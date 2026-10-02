@@ -36,6 +36,16 @@ sub vcl_recv {
       return (synth(400, "Missing or invalid X-Cache-Tags-Ban header"));
     }
     # Only obj.* in the expression, so the ban lurker can evict matching objects in the background.
+    # With X-Cache-Site-Ban, only that site's pages are banned (content that only changed on one site).
+    if (req.http.X-Cache-Site-Ban) {
+      if (req.http.X-Cache-Site-Ban !~ "^[0-9]+$") {
+        return (synth(400, "Invalid X-Cache-Site-Ban header"));
+      }
+      if (!std.ban("obj.http.X-Cache-Site == " + req.http.X-Cache-Site-Ban + " && obj.http.X-Cache-Tags ~ (^|[[:space:]])(" + req.http.X-Cache-Tags-Ban + ")([[:space:]]|$)")) {
+        return (synth(500, std.ban_error()));
+      }
+      return (synth(200, "Ban added"));
+    }
     if (!std.ban("obj.http.X-Cache-Tags ~ (^|[[:space:]])(" + req.http.X-Cache-Tags-Ban + ")([[:space:]]|$)")) {
       return (synth(500, std.ban_error()));
     }
@@ -76,4 +86,5 @@ sub vcl_deliver {
   }
   # Keep the tags visible for debugging; uncomment to hide them in production.
   # unset resp.http.X-Cache-Tags;
+  # unset resp.http.X-Cache-Site;
 }

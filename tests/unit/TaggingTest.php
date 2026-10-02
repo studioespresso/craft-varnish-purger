@@ -4,19 +4,26 @@ namespace studioespresso\varnish\tests\unit;
 
 use Codeception\Test\Unit;
 use Craft;
+use craft\elements\Category;
 use craft\elements\Entry;
 use craft\fieldlayoutelements\CustomField;
+use craft\fields\Categories;
 use craft\fields\Entries;
+use craft\fields\PlainText;
+use craft\models\CategoryGroup;
+use craft\models\CategoryGroup_SiteSettings;
 use craft\models\EntryType;
 use craft\models\FieldLayout;
 use craft\models\FieldLayoutTab;
 use craft\models\Section;
 use craft\models\Section_SiteSettings;
 use craft\web\View;
+use studioespresso\varnish\services\Purger;
 use studioespresso\varnish\Varnish;
 
 /**
- * Two channels: News entries relate to Topics through a section-limited `related` field.
+ * Two channels: News entries relate to Topics through a section-limited `related` field,
+ * and to a Labels category through a `labels` categories field.
  */
 class TaggingTest extends Unit
 {
@@ -25,6 +32,8 @@ class TaggingTest extends Unit
     private Section $topics;
     private Entry $topic;
     private Entry $article;
+    private CategoryGroup $labels;
+    private Category $label;
 
     protected function _before(): void
     {
@@ -38,10 +47,33 @@ class TaggingTest extends Unit
             'sources' => ["section:{$this->topics->uid}"],
         ]);
         Craft::$app->getFields()->saveField($related);
-        $this->news = $this->createSection('news', $related);
 
+        $this->labels = new CategoryGroup(['name' => 'Labels', 'handle' => 'labels']);
+        $this->labels->setSiteSettings(array_map(
+            fn(int $siteId) => new CategoryGroup_SiteSettings(['siteId' => $siteId, 'hasUrls' => false]),
+            array_combine(Craft::$app->getSites()->getAllSiteIds(), Craft::$app->getSites()->getAllSiteIds()),
+        ));
+        $this->labels->setFieldLayout(new FieldLayout(['type' => Category::class]));
+        $this->assertTrue(Craft::$app->getCategories()->saveGroup($this->labels), implode(', ', $this->labels->getFirstErrors()));
+        $labelsField = new Categories([
+            'name' => 'Labels',
+            'handle' => 'labels',
+            'source' => "group:{$this->labels->uid}",
+        ]);
+        Craft::$app->getFields()->saveField($labelsField);
+
+        $summary = new PlainText(['name' => 'Summary', 'handle' => 'summary', 'translationMethod' => 'site']);
+        Craft::$app->getFields()->saveField($summary);
+
+        $this->news = $this->createSection('news', $related, $labelsField, $summary);
+
+        $this->label = new Category(['groupId' => $this->labels->id, 'title' => 'Label']);
+        $this->assertTrue(Craft::$app->getElements()->saveElement($this->label));
         $this->topic = $this->createEntry($this->topics, 'Topic');
-        $this->article = $this->createEntry($this->news, 'Article', ['related' => [$this->topic->id]]);
+        $this->article = $this->createEntry($this->news, 'Article', [
+            'related' => [$this->topic->id],
+            'labels' => [$this->label->id],
+        ]);
         $this->plugin->purger->flush();
     }
 
@@ -65,15 +97,58 @@ class TaggingTest extends Unit
         $this->assertNotContains('e:any', $tags);
     }
 
+    public function testRelatedCategoryIsScopedToItsGroup(): void
+    {
+        $tags = $this->render('_labels', ['entry' => $this->article]);
+
+        $this->assertContains((string)$this->label->id, $tags);
+        $this->assertContains("c:g:{$this->labels->id}", $tags);
+        $this->assertNotContains('c:any', $tags);
+    }
+
     public function testSavingAnEntryBansItsTags(): void
     {
         Craft::$app->getElements()->saveElement($this->topic);
 
-        $bans = $this->plugin->purger->getPending();
+        $bans = array_merge(...array_values($this->plugin->purger->getPending()));
         $this->assertContains((string)$this->topic->id, $bans);
         $this->assertContains("e:s:{$this->topics->id}", $bans);
         $this->assertContains('e:any', $bans);
         $this->assertNotContains("e:s:{$this->news->id}", $bans);
+    }
+
+    public function testTranslatableChangeOnlyBansThatSite(): void
+    {
+        $this->article->setFieldValue('summary', 'Only on this site');
+        Craft::$app->getElements()->saveElement($this->article);
+
+        $pending = $this->plugin->purger->getPending();
+        $this->assertArrayNotHasKey(Purger::ALL_SITES, $pending);
+        $this->assertContains((string)$this->article->id, $pending[$this->article->siteId] ?? []);
+    }
+
+    public function testTranslatableTitleOnlyBansThatSite(): void
+    {
+        $this->article->title = 'Renamed on this site';
+        Craft::$app->getElements()->saveElement($this->article);
+
+        $this->assertSame([$this->article->siteId], array_keys($this->plugin->purger->getPending()));
+    }
+
+    public function testSharedChangeBansAllSites(): void
+    {
+        // Relation fields are shared across sites by default, so the other sites' pages change too.
+        $this->article->setFieldValue('related', []);
+        Craft::$app->getElements()->saveElement($this->article);
+
+        $this->assertSame([Purger::ALL_SITES], array_keys($this->plugin->purger->getPending()));
+    }
+
+    public function testNewElementBansAllSites(): void
+    {
+        $this->createEntry($this->news, 'Brand new');
+
+        $this->assertSame([Purger::ALL_SITES], array_keys($this->plugin->purger->getPending()));
     }
 
     public function testDraftSavesAreIgnored(): void
@@ -89,13 +164,13 @@ class TaggingTest extends Unit
         return $this->plugin->pageTags->getTags();
     }
 
-    private function createSection(string $handle, ?Entries $field = null): Section
+    private function createSection(string $handle, Entries|Categories|PlainText ...$fields): Section
     {
         $type = new EntryType(['name' => ucfirst($handle), 'handle' => $handle]);
         $layout = new FieldLayout(['type' => Entry::class]);
-        if ($field) {
+        if ($fields) {
             $tab = new FieldLayoutTab(['name' => 'Content', 'layout' => $layout]);
-            $tab->setElements([new CustomField($field)]);
+            $tab->setElements(array_map(fn($field) => new CustomField($field), $fields));
             $layout->setTabs([$tab]);
         }
         $type->setFieldLayout($layout);

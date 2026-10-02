@@ -3,6 +3,7 @@
 namespace studioespresso\varnish\services;
 
 use Craft;
+use craft\elements\db\CategoryQuery;
 use craft\elements\db\ElementQuery;
 use craft\elements\db\EntryQuery;
 use craft\events\DefineValueEvent;
@@ -24,6 +25,8 @@ use yii\web\Response;
 class PageTags extends Component
 {
     public const HEADER = 'X-Cache-Tags';
+    /** Site the page belongs to, so a ban can be limited to one site. */
+    public const SITE_HEADER = 'X-Cache-Site';
 
     /** @var string[] Craft tags collected for the current page */
     private array $tags = [];
@@ -61,6 +64,7 @@ class PageTags extends Component
                 return;
             }
             $response->getHeaders()->set(self::HEADER, implode(' ', $tags));
+            $response->getHeaders()->set(self::SITE_HEADER, (string)Craft::$app->getSites()->getCurrentSite()->id);
             // Craft shortens this for expiring entries; otherwise it's the cacheDuration config setting.
             if ($this->ttl) {
                 $response->getHeaders()->set('X-Cache-Ttl', (string)$this->ttl);
@@ -82,29 +86,40 @@ class PageTags extends Component
     }
 
     /**
-     * Craft filters relation field queries with a join, so they carry no section and get the catch-all
-     * `Entry::*` tag: every entry save would purge every page using a relation field. Scope them to the
-     * field's sources instead; a source element saving its relations is covered by its own `element::{id}` tag.
+     * Craft filters relation field queries with a join, so they carry no section or group and get the catch-all
+     * `*` tag: every entry (or category) save would purge every page using such a field. Scope them to the field's
+     * sources instead; a source element saving its relations is covered by its own `element::{id}` tag.
      */
     private function scopeRelationQuery(DefineValueEvent $e): void
     {
         $query = $e->sender;
-        if ($e->value || !$query instanceof EntryQuery || !$query->eagerLoadSourceElement) {
+        if ($e->value || !($query instanceof EntryQuery || $query instanceof CategoryQuery) || !$query->eagerLoadSourceElement) {
             return;
         }
         $handle = substr((string)strrchr(':' . $query->eagerLoadHandle, ':'), 1);
         $field = $query->eagerLoadSourceElement->getFieldLayout()?->getFieldByHandle($handle);
-        if (!$field instanceof BaseRelationField || !is_array($field->sources)) {
+        if (!$field instanceof BaseRelationField) {
+            return;
+        }
+        // Entries fields list several `sources`; Categories fields have a single `source`.
+        $sources = $field->allowMultipleSources ? $field->sources : [$field->source];
+        if (!is_array($sources)) {
             return;
         }
         $tags = [];
-        foreach ($field->sources as $source) {
-            $section = str_starts_with($source, 'section:') ? Craft::$app->getEntries()->getSectionByUid(substr($source, 8)) : null;
-            // ponytail: only plain section sources are scoped; anything else (singles, custom sources, other element types) keeps `*`.
-            if (!$section) {
+        foreach ($sources as $source) {
+            $tag = match (true) {
+                $query instanceof EntryQuery && str_starts_with((string)$source, 'section:') =>
+                    ($section = Craft::$app->getEntries()->getSectionByUid(substr($source, 8))) ? "section:$section->id" : null,
+                $query instanceof CategoryQuery && str_starts_with((string)$source, 'group:') =>
+                    ($group = Craft::$app->getCategories()->getGroupByUid(substr($source, 6))) ? "group:$group->id" : null,
+                default => null,
+            };
+            // ponytail: only plain section/group sources are scoped; anything else (singles, custom sources) keeps `*`.
+            if (!$tag) {
                 return;
             }
-            $tags[] = "section:$section->id";
+            $tags[] = $tag;
         }
         $e->value = $tags;
     }
