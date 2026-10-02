@@ -135,6 +135,15 @@ class TaggingTest extends Unit
         $this->assertSame([$this->article->siteId], array_keys($this->plugin->purger->getPending()));
     }
 
+    public function testSlugChangeBansAllSites(): void
+    {
+        // Other sites link to this version (language switchers), so a new URL must reach them too.
+        $this->article->slug = 'new-slug-on-this-site';
+        Craft::$app->getElements()->saveElement($this->article);
+
+        $this->assertSame([Purger::ALL_SITES], array_keys($this->plugin->purger->getPending()));
+    }
+
     public function testSharedChangeBansAllSites(): void
     {
         // Relation fields are shared across sites by default, so the other sites' pages change too.

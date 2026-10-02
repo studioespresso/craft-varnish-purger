@@ -38,8 +38,9 @@ class Purger extends Component
      * Whether a save only changed content of the element's own site, so other sites' pages can stay cached.
      *
      * Craft only invalidates the saved site, but quietly propagates shared values (untranslatable fields, post
-     * date, global status…) to the element's other sites. So anything that isn't clearly per-site bans all sites:
-     * new elements, saves without change info, and deletes, restores or moves.
+     * date, global status…) to the element's other sites. So only translatable content counts as per-site;
+     * anything else bans all sites: new elements, slug/URI/status changes, saves without change info, and
+     * deletes, restores or moves.
      *
      * ponytail: a page that queries another site's content (`.site('*')`) isn't purged by a site-scoped ban.
      */
@@ -51,13 +52,9 @@ class Purger extends Component
             return false;
         }
         foreach ($attributes as $attribute) {
-            $perSite = match ($attribute) {
-                'title' => $element->getIsTitleTranslatable(),
-                'slug' => $element->getIsSlugTranslatable(),
-                'uri', 'enabledForSite' => true,
-                default => false,
-            };
-            if (!$perSite) {
+            // Slug, URI and enabled status aren't site-specific here: other sites link to this version (a
+            // language switcher via `entry.localized`), so those pages need the new URL, or to drop the link.
+            if ($attribute !== 'title' || !$element->getIsTitleTranslatable()) {
                 return false;
             }
         }
