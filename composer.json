@@ -42,9 +42,15 @@
     "test": "codecept run unit"
   },
   "extra": {
-    "name": "Varnish",
+    "name": "Varnish Purger",
     "handle": "varnish",
-    "class": "studioespresso\\varnish\\Varnish"
+    "class": "studioespresso\\varnish\\Varnish",
+    "hasCpSettings": true,
+    "documentationUrl": "https://github.com/studioespresso/craft-varnish-purger/blob/main/README.md"
+  },
+  "support": {
+    "docs": "https://github.com/studioespresso/craft-varnish-purger/blob/main/README.md",
+    "issues": "https://github.com/studioespresso/craft-varnish-purger/issues"
   },
   "config": {
     "allow-plugins": {
