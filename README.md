@@ -1,5 +1,7 @@
 # Varnish Purger for Craft CMS
 
+![Screenshot](https://www.studioespresso.co/assets/varnish_purgner_github.png)
+
 Cache your Craft site in Varnish, and purge exactly the pages that changed when content is saved.
 
 Every page Varnish caches is labelled with what it shows: the entries, assets and categories it outputs, the sections it lists, the Matrix fields it renders. When an editor saves something, the plugin tells Varnish to drop every page with a matching label. Edit an event and only the event page and the listings that show it are purged; the rest of the site stays cached.
