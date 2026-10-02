@@ -17,9 +17,12 @@ use craft\models\FieldLayout;
 use craft\models\FieldLayoutTab;
 use craft\models\Section;
 use craft\models\Section_SiteSettings;
+use craft\queue\jobs\UpdateSearchIndex;
 use craft\web\View;
 use studioespresso\varnish\services\Purger;
 use studioespresso\varnish\Varnish;
+use yii\queue\ExecEvent;
+use yii\queue\Queue;
 
 /**
  * Two channels: News entries relate to Topics through a section-limited `related` field,
@@ -104,6 +107,32 @@ class TaggingTest extends Unit
         $this->assertContains((string)$this->label->id, $tags);
         $this->assertContains("c:g:{$this->labels->id}", $tags);
         $this->assertNotContains('c:any', $tags);
+    }
+
+    public function testSearchPageIsTaggedForSearchIndexUpdates(): void
+    {
+        $tags = $this->render('_search');
+
+        $this->assertContains('e:search', $tags);
+        // still purged by any entry save, since any new entry could match
+        $this->assertContains('e:any', $tags);
+    }
+
+    public function testSectionSearchKeepsItsSectionScope(): void
+    {
+        $tags = $this->render('_newsSearch');
+
+        $this->assertContains("e:s:{$this->news->id}", $tags);
+        $this->assertContains('e:search', $tags);
+        $this->assertNotContains('e:any', $tags);
+    }
+
+    public function testFinishedSearchIndexJobBansSearchPages(): void
+    {
+        $job = new UpdateSearchIndex(['elementType' => Entry::class, 'elementId' => $this->article->id, 'siteId' => $this->article->siteId]);
+        Craft::$app->getQueue()->trigger(Queue::EVENT_AFTER_EXEC, new ExecEvent(['job' => $job]));
+
+        $this->assertSame(['e:search'], $this->plugin->purger->getPending()[$this->article->siteId] ?? []);
     }
 
     public function testSavingAnEntryBansItsTags(): void

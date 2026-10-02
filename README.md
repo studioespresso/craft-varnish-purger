@@ -98,6 +98,7 @@ Tags are shortened to keep the header small:
 | `e:s:3` | lists entries from section 3 | any entry in section 3 changes, including new ones |
 | `e:t:4`, `e:f:6` | queries entry type 4, or the Matrix field 6 | an entry of that type, or in that field, changes |
 | `e:any` | runs an entry query with no scope | any entry changes |
+| `e:search` | runs an entry search | Craft finishes updating the search index for an entry |
 | `all` | is cached | everything is purged |
 
 The element type comes first: `e` entry, `c` category, `a` asset, `u` user, `t` tag, `g` global set, `b` content block, `ad` address, `p` Commerce product, `v` Commerce variant. Then the scope: `s` section, `t` entry type, `f` field, `o` owner, `g` group, `v` volume, `pt` product type.
@@ -107,6 +108,7 @@ Some details:
 - **Matrix:** saving a nested entry also purges its owner's pages.
 - **Drafts and revisions** never purge anything, so autosaves don't empty the cache.
 - **Relation fields:** Craft tags these queries `e:any` or `c:any`, so any entry or category save would purge every page using such a field. The plugin narrows Entries fields to the sections they allow, and Categories fields to their category group.
+- **Search results:** pages that use `.search()` are also tagged `e:search`. CP saves update Craft's search index in a queue job after the save (and after its purge), so the plugin purges search pages again once that job has run. Otherwise a search re-cached in between would miss the new content.
 - **Expiry dates:** pages are cached until the nearest expiry date of an entry they show, or for Craft's `cacheDuration` (1 day by default).
 - **Multi-site:** each page also carries its site ID (`X-Cache-Site`). When a save only changes translatable content (translatable fields, a translatable title), only that site's pages are purged. Anything else purges the affected pages on every site: shared values like untranslatable fields or the post date (Craft copies those to the other sites), new entries, and changes to a version's slug, URI or enabled status (other sites link to it, e.g. from a language switcher). One exception: a page that shows another site's content (`craft.entries.site('*')`) isn't purged by a change limited to that other site.
 - **What gets tagged:** only front-end `GET` requests that return `200`. Error pages, redirects, CP requests and previews are never tagged, so Varnish doesn't cache them.

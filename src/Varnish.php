@@ -7,6 +7,7 @@ use craft\base\Model;
 use craft\base\Plugin;
 use craft\events\InvalidateElementCachesEvent;
 use craft\events\RegisterCacheOptionsEvent;
+use craft\queue\jobs\UpdateSearchIndex;
 use craft\services\Elements;
 use craft\utilities\ClearCaches;
 use studioespresso\varnish\helpers\TagHelper;
@@ -15,6 +16,8 @@ use studioespresso\varnish\services\PageTags;
 use studioespresso\varnish\services\Purger;
 use yii\base\Application;
 use yii\base\Event;
+use yii\queue\ExecEvent;
+use yii\queue\Queue;
 
 /**
  * Tags front-end pages with Craft's element cache tags and bans those tags in Varnish when Craft invalidates them.
@@ -49,6 +52,11 @@ class Varnish extends Plugin
 
         // Craft fires this on save, delete, restore and move, including Matrix owners.
         Event::on(Elements::class, Elements::EVENT_INVALIDATE_CACHES, fn(InvalidateElementCachesEvent $e) => $this->purger->queue($e));
+        Event::on(Queue::class, Queue::EVENT_AFTER_EXEC, function(ExecEvent $e) {
+            if ($e->job instanceof UpdateSearchIndex) {
+                $this->purger->queueSearchIndexed($e->job);
+            }
+        });
         Craft::$app->on(Application::EVENT_AFTER_REQUEST, fn() => $this->purger->flush());
 
         Event::on(ClearCaches::class, ClearCaches::EVENT_REGISTER_CACHE_OPTIONS, function(RegisterCacheOptionsEvent $e) {

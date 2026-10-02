@@ -27,6 +27,8 @@ class PageTags extends Component
     public const HEADER = 'X-Cache-Tags';
     /** Site the page belongs to, so a ban can be limited to one site. */
     public const SITE_HEADER = 'X-Cache-Site';
+    /** Craft cache tag (relative to the element type) added to search queries. */
+    public const SEARCH_TAG = 'search';
 
     /** @var string[] Craft tags collected for the current page */
     private array $tags = [];
@@ -54,7 +56,10 @@ class PageTags extends Component
             $this->tags = $dependency->tags ?? [];
         });
 
-        Event::on(ElementQuery::class, ElementQuery::EVENT_DEFINE_CACHE_TAGS, fn(DefineValueEvent $e) => $this->scopeRelationQuery($e));
+        Event::on(ElementQuery::class, ElementQuery::EVENT_DEFINE_CACHE_TAGS, function(DefineValueEvent $e) {
+            $this->scopeRelationQuery($e);
+            $this->tagSearchQuery($e);
+        });
 
         Craft::$app->getResponse()->on(Response::EVENT_AFTER_PREPARE, function(Event $e) {
             /** @var Response $response */
@@ -83,6 +88,20 @@ class PageTags extends Component
             return [];
         }
         return array_values(array_unique([TagHelper::TAG_ALL, ...array_map(TagHelper::headerTag(...), $this->tags)]));
+    }
+
+    /**
+     * Search results also depend on Craft's search index, which web requests update in a queue job after the save
+     * (and after its purge). Tag search queries `{type}:search` so [[Purger::queueSearchIndexed()]] can purge them
+     * once the index is up to date.
+     */
+    private function tagSearchQuery(DefineValueEvent $e): void
+    {
+        if (!$e->sender instanceof ElementQuery || !$e->sender->search) {
+            return;
+        }
+        // An empty value would get Craft's catch-all `*` tag; keep it, since any new element could match.
+        $e->value = [...($e->value ?: ['*']), self::SEARCH_TAG];
     }
 
     /**

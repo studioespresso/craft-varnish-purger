@@ -6,6 +6,7 @@ use Craft;
 use craft\base\ElementInterface;
 use craft\events\InvalidateElementCachesEvent;
 use craft\helpers\ElementHelper;
+use craft\queue\jobs\UpdateSearchIndex;
 use GuzzleHttp\Promise\Utils;
 use studioespresso\varnish\helpers\TagHelper;
 use studioespresso\varnish\Varnish;
@@ -32,6 +33,15 @@ class Purger extends Component
         foreach ($e->tags as $tag) {
             $this->pending[$scope][TagHelper::headerTag($tag)] = true;
         }
+    }
+
+    /**
+     * Purges search result pages once Craft's queued search-index update for an element has run.
+     */
+    public function queueSearchIndexed(UpdateSearchIndex $job): void
+    {
+        $scope = is_numeric($job->siteId) ? (int)$job->siteId : self::ALL_SITES;
+        $this->pending[$scope][TagHelper::headerTag("element::$job->elementType::" . PageTags::SEARCH_TAG)] = true;
     }
 
     /**
