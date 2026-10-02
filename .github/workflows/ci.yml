@@ -23,8 +23,13 @@ jobs:
       token: ${{ secrets.GITHUB_TOKEN }}
 
   tests:
-    name: tests
+    name: tests (PHP ${{ matrix.php }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Lowest supported PHP (composer.json require + config.platform) up to the newest
+        php: ['8.3', '8.4', '8.5']
     services:
       mysql:
         image: mysql:8.0
@@ -41,7 +46,7 @@ jobs:
       - name: Setup PHP
         uses: shivammathur/setup-php@v2
         with:
-          php-version: '8.4'
+          php-version: ${{ matrix.php }}
           extensions: mbstring, pdo, pdo_mysql, intl
 
       - name: Install dependencies
