@@ -8,7 +8,7 @@ The labels are Craft's own element cache tags, the ones behind `{% cache %}`, so
 
 ## Requirements
 
-- Craft CMS 5
+- Craft CMS 5, on PHP 8.3 or newer
 - Varnish 6.6 or newer (tested with 7.7), in front of your site
 - Varnish must be reachable from the Craft server, so it can receive purge requests
 
@@ -74,6 +74,21 @@ curl -sI https://example.com/news | grep -i x-cache
 ```
 
 Save one of the entries on that page in the CP, and the next request is a `MISS` again. Failed purges are always logged as `Varnish ban failed for …`; with `devMode` on, successful ones are logged too, as `Varnish banned: …`.
+
+## ESI (Edge Side Includes)
+
+Render part of a cached page in its own request, so it can change on every page view while the page around it stays cached:
+
+```twig
+{{ craft.varnish.include('_esi/now', {entryId: entry.id}) }}
+```
+
+- Behind Varnish this outputs an `<esi:include>` tag, which Varnish replaces with the fragment. Anywhere else (no Varnish, `novarnish.` hosts, console) the template is rendered inline, so templates work either way.
+- The fragment is rendered by a plugin action (`/actions/varnish/esi/render`). Its parameters are signed with Craft's security key, so it can't be used to render arbitrary templates. It's never cached.
+- Pass simple values only (IDs, strings): the fragment is rendered in a separate request, on the same site as the page.
+- Varnish drops the headers of ESI fragments, so a fragment can't set cookies. Don't use it for CSRF tokens: enable Craft's `asyncCsrfInputs` instead.
+
+`example.vcl` handles both sides: it sets `Surrogate-Capability` on requests (so Craft knows it can output ESI tags), and processes responses that send `Surrogate-Control: content="ESI/1.0"`.
 
 ## Purging everything
 

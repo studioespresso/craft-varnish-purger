@@ -10,10 +10,13 @@ use craft\events\RegisterCacheOptionsEvent;
 use craft\queue\jobs\UpdateSearchIndex;
 use craft\services\Elements;
 use craft\utilities\ClearCaches;
+use craft\web\twig\variables\CraftVariable;
 use studioespresso\varnish\helpers\TagHelper;
 use studioespresso\varnish\models\Settings;
+use studioespresso\varnish\services\Esi;
 use studioespresso\varnish\services\PageTags;
 use studioespresso\varnish\services\Purger;
+use studioespresso\varnish\variables\VarnishVariable;
 use yii\base\Application;
 use yii\base\Event;
 use yii\queue\ExecEvent;
@@ -22,6 +25,7 @@ use yii\queue\Queue;
 /**
  * Tags front-end pages with Craft's element cache tags and bans those tags in Varnish when Craft invalidates them.
  *
+ * @property-read Esi $esi
  * @property-read PageTags $pageTags
  * @property-read Purger $purger
  * @method Settings getSettings()
@@ -35,6 +39,7 @@ class Varnish extends Plugin
         parent::init();
 
         $this->setComponents([
+            'esi' => Esi::class,
             'pageTags' => PageTags::class,
             'purger' => Purger::class,
         ]);
@@ -58,6 +63,8 @@ class Varnish extends Plugin
             }
         });
         Craft::$app->on(Application::EVENT_AFTER_REQUEST, fn() => $this->purger->flush());
+
+        Event::on(CraftVariable::class, CraftVariable::EVENT_INIT, fn(Event $e) => $e->sender->set('varnish', VarnishVariable::class));
 
         Event::on(ClearCaches::class, ClearCaches::EVENT_REGISTER_CACHE_OPTIONS, function(RegisterCacheOptionsEvent $e) {
             $e->options[] = [

@@ -24,6 +24,13 @@ sub vcl_recv {
     return (pipe);
   }
 
+  # Tell Craft we can process <esi:include> tags (craft.varnish.include() falls back to inline rendering without
+  # it). Only after the pipe above: piped requests bypass Varnish, so their ESI tags would never be processed.
+  unset req.http.Surrogate-Capability;
+  if (req.esi_level == 0) {
+    set req.http.Surrogate-Capability = {"varnish="ESI/1.0""};
+  }
+
   if (req.method == "BAN") {
     # A proxy/load balancer also connects from an internal IP. Varnish appends client.ip to X-Forwarded-For,
     # so more than one address means the request was relayed: refuse it.
@@ -67,6 +74,12 @@ sub vcl_recv {
 }
 
 sub vcl_backend_response {
+  # Responses that contain <esi:include> tags ask for processing; each include is fetched as its own request
+  if (beresp.http.Surrogate-Control ~ "ESI/1.0") {
+    unset beresp.http.Surrogate-Control;
+    set beresp.do_esi = true;
+  }
+
   if (!beresp.http.X-Cache-Tags) {
     set beresp.uncacheable = true;
     set beresp.ttl = 120s;
