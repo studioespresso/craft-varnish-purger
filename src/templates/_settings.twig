@@ -1,0 +1,33 @@
+{% import '_includes/forms' as forms %}
+
+{# New rows assume a Linux-package install (port 6081); an empty port still means 80, like ddev/Docker. #}
+
+{{ forms.editableTableField({
+    label: 'Varnish servers'|t('varnish'),
+    instructions: 'Every Varnish server that caches this site. Saving content sends a BAN request to each of them, so use their internal addresses (e.g. `varnish` or `10.0.0.11`), not the public site URL. The port is usually 6081 (Linux packages) or 80 (Docker); leave it empty for 80. Hosts can be environment variables, like `$VARNISH_HOST`.'|t('varnish'),
+    id: 'purgeUrls',
+    name: 'purgeUrls',
+    cols: {
+        host: {
+            heading: 'Host'|t('varnish'),
+            type: 'singleline',
+            placeholder: 'varnish',
+            code: true,
+        },
+        port: {
+            heading: 'Port'|t('varnish'),
+            type: 'number',
+            placeholder: '80',
+            width: 120,
+        },
+    },
+    rows: settings.getServers(),
+    defaultValues: {port: 6081},
+    allowAdd: not overridden,
+    allowDelete: not overridden,
+    allowReorder: not overridden,
+    static: overridden,
+    addRowLabel: 'Add a server'|t('varnish'),
+    warning: overridden ? 'This is being overridden by the `purgeUrls` setting in `config/varnish.php`.'|t('varnish')|md(inlineOnly=true) : null,
+    errors: settings.getErrors('purgeUrls'),
+}) }}

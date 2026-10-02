@@ -3,3 +3,7 @@ vendor
 node_modules
 .DS_Store
 yarn-error.log
+# Tests
+/tests/_output/*
+/tests/_craft/storage/*
+/tests/_support/_generated/*

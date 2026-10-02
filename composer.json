@@ -1,0 +1,55 @@
+{
+  "name": "studioespresso/craft-varnish-purger",
+  "description": "Tag-based Varnish purging for Craft CMS: tracks the elements and queries used on each page and purges them on save.",
+  "version": "1.0.0-beta.1",
+  "type": "craft-plugin",
+  "license": "MIT",
+  "keywords": [
+    "craft",
+    "cms",
+    "craftcms",
+    "craft-plugin",
+    "varnish",
+    "cache"
+  ],
+  "authors": [
+    {
+      "name": "Studio Espresso",
+      "homepage": "https://www.studioespresso.co"
+    }
+  ],
+  "require": {
+    "craftcms/cms": "^5.0"
+  },
+  "require-dev": {
+    "codeception/codeception": "^5.0.0",
+    "codeception/module-asserts": "^3.0",
+    "codeception/module-yii2": "^1.1.10",
+    "craftcms/ecs": "dev-main",
+    "craftcms/phpstan": "dev-main",
+    "phpunit/phpunit": "<13.4",
+    "phpstan/phpstan": "^2.2"
+  },
+  "autoload": {
+    "psr-4": {
+      "studioespresso\\varnish\\": "src/"
+    }
+  },
+  "scripts": {
+    "check-cs": "ecs check --ansi",
+    "fix-cs": "ecs check --ansi --fix",
+    "phpstan": "phpstan --memory-limit=1G",
+    "test": "codecept run unit"
+  },
+  "extra": {
+    "name": "Varnish",
+    "handle": "varnish",
+    "class": "studioespresso\\varnish\\Varnish"
+  },
+  "config": {
+    "allow-plugins": {
+      "yiisoft/yii2-composer": true,
+      "craftcms/plugin-installer": true
+    }
+  }
+}
