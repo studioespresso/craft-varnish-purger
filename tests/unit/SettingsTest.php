@@ -79,6 +79,28 @@ class SettingsTest extends Unit
         putenv('VARNISH_TEST_URL');
     }
 
+    public function testResolveMapsHostnameToIp(): void
+    {
+        putenv('VARNISH_TEST_IP=5.134.6.180');
+        $settings = new Settings(['resolve' => ['jan.example.com' => '$VARNISH_TEST_IP', 'other.example.com' => '10.0.0.1']]);
+
+        $this->assertSame(['jan.example.com:443:5.134.6.180'], $settings->getCurlResolveFor('https://jan.example.com'));
+        $this->assertSame(['jan.example.com:80:5.134.6.180'], $settings->getCurlResolveFor('http://jan.example.com/'));
+        $this->assertSame(['other.example.com:6081:10.0.0.1'], $settings->getCurlResolveFor('http://other.example.com:6081'));
+        $this->assertSame([], $settings->getCurlResolveFor('http://varnish'), 'hosts without a mapping connect normally');
+        putenv('VARNISH_TEST_IP');
+    }
+
+    public function testHostnamesAreNormalised(): void
+    {
+        putenv('VARNISH_TEST_HOST=WWW.Example.com:443');
+        $settings = new Settings(['hostnames' => ['jan.example.com', '$VARNISH_TEST_HOST', ' jan.example.com ', '']]);
+
+        $this->assertSame(['jan.example.com', 'www.example.com'], $settings->getResolvedHostnames());
+        $this->assertSame([], (new Settings())->getResolvedHostnames(), 'empty by default: no limit');
+        putenv('VARNISH_TEST_HOST');
+    }
+
     public function testInvalidAddressesFailValidation(): void
     {
         $this->assertTrue((new Settings(['purgeUrls' => ['http://varnish', 'http://10.0.0.11:6081']]))->validate());

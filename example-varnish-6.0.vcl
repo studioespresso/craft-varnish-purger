@@ -51,15 +51,23 @@ sub vcl_recv {
       return (synth(400, "Missing or invalid X-Cache-Tags-Ban header"));
     }
     # Only obj.* in the expression, so the ban lurker can evict matching objects in the background.
-    # With X-Cache-Site-Ban, only that site's pages are banned (content that only changed on one site).
+    set req.http.X-Ban-Expression = "obj.http.X-Cache-Tags ~ (^|[[:space:]])(" + req.http.X-Cache-Tags-Ban + ")([[:space:]]|$)";
+    # X-Cache-Site-Ban: only that site's pages (content that only changed on one site)
     if (req.http.X-Cache-Site-Ban) {
       if (req.http.X-Cache-Site-Ban !~ "^[0-9]+$") {
         return (synth(400, "Invalid X-Cache-Site-Ban header"));
       }
-      ban("obj.http.X-Cache-Site == " + req.http.X-Cache-Site-Ban + " && obj.http.X-Cache-Tags ~ (^|[[:space:]])(" + req.http.X-Cache-Tags-Ban + ")([[:space:]]|$)");
-      return (synth(200, "Ban added"));
+      set req.http.X-Ban-Expression = req.http.X-Ban-Expression + " && obj.http.X-Cache-Site == " + req.http.X-Cache-Site-Ban;
     }
-    ban("obj.http.X-Cache-Tags ~ (^|[[:space:]])(" + req.http.X-Cache-Tags-Ban + ")([[:space:]]|$)");
+    # X-Cache-Hosts-Ban: only pages cached under these hostnames ("|"-separated), when other sites share this Varnish
+    if (req.http.X-Cache-Hosts-Ban) {
+      if (req.http.X-Cache-Hosts-Ban !~ "^[a-z0-9.-]+(\|[a-z0-9.-]+)*$") {
+        return (synth(400, "Invalid X-Cache-Hosts-Ban header"));
+      }
+      set req.http.X-Ban-Expression = req.http.X-Ban-Expression + " && obj.http.X-Cache-Host ~ ^(" + req.http.X-Cache-Hosts-Ban + ")$";
+    }
+    # Varnish 6.0: ban() can't report errors (std.ban() needs 6.6+); the headers are validated above instead
+    ban(req.http.X-Ban-Expression);
     return (synth(200, "Ban added"));
   }
 
@@ -90,6 +98,8 @@ sub vcl_backend_response {
     return (deliver);
   }
   unset beresp.http.Set-Cookie;
+  # The hostname this page is cached under, for bans limited with X-Cache-Hosts-Ban
+  set beresp.http.X-Cache-Host = std.tolower(regsub(bereq.http.host, ":[0-9]+$", ""));
   # Tags drive invalidation; the TTL is a safety net. Craft suggests one (shorter for entries with an expiry date).
   set beresp.ttl = std.duration(beresp.http.X-Cache-Ttl + "s", 1d);
   unset beresp.http.X-Cache-Ttl;
@@ -101,6 +111,8 @@ sub vcl_deliver {
   if (obj.hits > 0) {
     set resp.http.X-Cache = "HIT";
   }
+  # Internal: only used to limit bans by hostname
+  unset resp.http.X-Cache-Host;
   # Keep the tags visible for debugging; uncomment to hide them in production.
   # unset resp.http.X-Cache-Tags;
   # unset resp.http.X-Cache-Site;

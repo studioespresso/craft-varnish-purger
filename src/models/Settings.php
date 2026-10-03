@@ -17,6 +17,27 @@ class Settings extends Model
     public array $purgeUrls = [];
 
     /**
+     * Connect to a specific IP for a purge URL's hostname, like an /etc/hosts entry just for purging:
+     * `['jan.example.com' => '5.134.6.180']`. Use it when the hostname must be in the URL (shared hosting routes on
+     * it, and HTTPS needs it for the certificate) but DNS points elsewhere, e.g. to Cloudflare. Values may be
+     * environment variables.
+     *
+     * @var array<string, string>
+     */
+    public array $resolve = [];
+
+    /**
+     * Only ban cached pages of these hostnames, e.g. `['jan.example.com', 'www.example.com']`. Needed when other sites
+     * (another Craft install, another customer) share the same Varnish: without it, a ban for element 12 also drops
+     * their pages tagged 12, and "clear Varnish cache" empties theirs too. List every hostname this install's pages
+     * are cached under, aliases and www-variants included: pages under a missing hostname are never purged.
+     * Empty (default): bans match pages of every hostname. Values may be environment variables.
+     *
+     * @var string[]
+     */
+    public array $hostnames = [];
+
+    /**
      * Rows for the CP table: `[['host' => 'varnish', 'port' => 80], …]`.
      *
      * @return array<array{host: string, port: int|string}>
@@ -71,6 +92,32 @@ class Settings extends Model
             unset($values['purgeUrls']);
         }
         parent::setAttributes($values, $safeOnly);
+    }
+
+    /**
+     * cURL `CURLOPT_RESOLVE` entries (`host:port:ip`) for a purge URL, from [[resolve]].
+     *
+     * @return string[]
+     */
+    public function getCurlResolveFor(string $url): array
+    {
+        $parts = parse_url($url);
+        $host = $parts['host'] ?? null;
+        $ip = $host !== null ? App::parseEnv($this->resolve[$host] ?? '') : '';
+        if (!$ip) {
+            return [];
+        }
+        $port = $parts['port'] ?? (($parts['scheme'] ?? 'http') === 'https' ? 443 : 80);
+        return ["$host:$port:$ip"];
+    }
+
+    /**
+     * @return string[] [[hostnames]] with environment variables resolved, lowercased, without ports
+     */
+    public function getResolvedHostnames(): array
+    {
+        $hosts = array_map(fn(string $host) => strtolower(preg_replace('/:\d+$/', '', trim(App::parseEnv($host)))), $this->hostnames);
+        return array_values(array_unique(array_filter($hosts)));
     }
 
     /**

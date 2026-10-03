@@ -74,6 +74,20 @@ return [
 - Environment keys match on substrings: `'prod'` also matches `production`.
 - Leave `purgeUrls` out for an environment to manage its servers in the CP instead.
 
+Two more options, for hosting setups (config file only):
+
+```php
+'production' => [
+    'purgeUrls' => ['https://www.example.com'],
+    // Connect to this IP for the purge URL's hostname, like an /etc/hosts entry just for purging. Use it when DNS
+    // points elsewhere (e.g. Cloudflare) but the hostname must stay in the URL (shared hosting routes on it, HTTPS needs it).
+    'resolve' => ['www.example.com' => '203.0.113.10'],
+    // Only ban pages cached under these hostnames: needed when other sites share the same Varnish. List every
+    // hostname this install's pages are cached under (www-variants, aliases): pages under a missing one are never purged.
+    'hostnames' => ['example.com', 'www.example.com'],
+],
+```
+
 If no servers are configured, pages are still tagged and cached but nothing is ever purged. A warning is logged each time a purge is skipped.
 
 ## 3. Check that it works
@@ -163,9 +177,10 @@ When content changes, the plugin collects the tags Craft invalidates and, at the
 BAN http://127.0.0.1:6081/
 X-Cache-Tags-Ban: 45|e:s:3|e:t:1|e:any
 X-Cache-Site-Ban: 1
+X-Cache-Hosts-Ban: example.com|www.example.com
 ```
 
-`X-Cache-Site-Ban` is only sent when the change was limited to one site.
+`X-Cache-Site-Ban` is only sent when the change was limited to one site, and `X-Cache-Hosts-Ban` only when `hostnames` is configured. The VCL stores the hostname each page was cached under (`X-Cache-Host`, hidden from visitors) to match it.
 
 Varnish then drops every cached page carrying one of those tags, whatever its URL. Requests go to all servers in parallel. An unreachable server is logged and skipped, and doesn't slow down saving by more than a few seconds.
 

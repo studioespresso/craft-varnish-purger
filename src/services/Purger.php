@@ -112,7 +112,9 @@ class Purger extends Component
         if (!$tags) {
             return [];
         }
-        $urls = Varnish::getInstance()->getSettings()->getResolvedPurgeUrls();
+        $settings = Varnish::getInstance()->getSettings();
+        $urls = $settings->getResolvedPurgeUrls();
+        $hostnames = $settings->getResolvedHostnames();
         if (!$urls) {
             Craft::warning('Varnish ban skipped: no servers configured (Settings → Plugins → Varnish, or config/varnish.php).', __METHOD__);
             return [];
@@ -128,7 +130,16 @@ class Purger extends Component
                 if ($siteId !== null) {
                     $headers[PageTags::SITE_HEADER . '-Ban'] = (string)$siteId;
                 }
-                $requests[] = [$url, $client->requestAsync('BAN', $url, ['headers' => $headers])];
+                if ($hostnames) {
+                    // Only this install's pages, when other sites share the Varnish
+                    $headers['X-Cache-Hosts-Ban'] = implode('|', $hostnames);
+                }
+                $options = ['headers' => $headers];
+                if ($resolve = $settings->getCurlResolveFor($url)) {
+                    // Connect to the configured IP, keeping the hostname for routing and the TLS certificate
+                    $options['curl'] = [CURLOPT_RESOLVE => $resolve];
+                }
+                $requests[] = [$url, $client->requestAsync('BAN', $url, $options)];
             }
         }
 
