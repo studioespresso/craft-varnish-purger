@@ -23,6 +23,11 @@ acl purge {
 }
 
 sub vcl_recv {
+  # DDEV: novarnish.* bypasses Varnish.
+  if (req.http.Host ~ "^novarnish\.") {
+    return (pipe);
+  }
+
   # Tell Craft we can process <esi:include> tags (craft.varnish.include() falls back to inline rendering without
   # it). Only after the pipe above: piped requests bypass Varnish, so their ESI tags would never be processed.
   unset req.http.Surrogate-Capability;
