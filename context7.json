@@ -1,0 +1,37 @@
+{
+  "$schema": "https://context7.com/schema/context7.json",
+  "url": "https://context7.com/studioespresso/craft-varnish-purger",
+  "public_key": "pk_apXrKaPOYGd884uGpHIGV",
+  "projectTitle": "Varnish Purger for Craft CMS",
+  "description": "Varnish Purger caches Craft CMS 5 front-end pages in Varnish and purges exactly the pages that changed. Every cached page gets an X-Cache-Tags header with Craft's own element cache tags (the ones behind {% cache %}); when Craft invalidates those tags on save, delete, restore or move, the plugin sends a BAN request and Varnish drops every page carrying them. It uses core Varnish bans (no vmods), supports multiple Varnish servers, site-scoped purging for multi-site, and ESI fragments via craft.varnish.include().",
+  "excludeFolders": [
+    "tests",
+    ".github",
+    "vendor"
+  ],
+  "excludeFiles": [
+    "composer.lock",
+    "LICENSE.md",
+    "CHANGELOG.md",
+    "ecs.php",
+    "phpstan.neon",
+    "codeception.yml"
+  ],
+  "rules": [
+    "Install with `composer require studioespresso/craft-varnish-purger` and `php craft plugin/install varnish`. The plugin handle is `varnish` and the PHP namespace is `studioespresso\\varnish`. It requires Craft CMS 5 on PHP 8.3+, and Varnish 6.6+ in front of the site.",
+    "Varnish must run the plugin's VCL (start from example.vcl in the repository). It only caches responses that carry an X-Cache-Tags header, passes the CP, action requests, previews, non-GET requests and logged-in users (Craft's `_identity` cookie), strips cookies from cached pages, and turns BAN requests into bans. Without it, nothing is cached or purged.",
+    "Configure the Varnish servers that receive BAN requests in Settings → Plugins → Varnish (host + port table), or per environment in config/varnish.php as `return ['purgeUrls' => ['http://127.0.0.1:6081']];`. config/varnish.php overrides and locks the CP setting. Values may be environment variables (`$VARNISH_PURGE_URL`). Use Varnish's internal address, never the public site URL: the VCL rejects BANs relayed through a proxy, CDN or load balancer, and only accepts IPs in its `acl purge`.",
+    "BANs are sent once at the end of the request to every configured server in parallel, as `BAN /` with header `X-Cache-Tags-Ban: tag1|tag2` (and `X-Cache-Site-Ban: <siteId>` for site-scoped bans). A missing server config logs a warning instead of failing.",
+    "Do not add your own cache tags or purge logic for element changes: tagging and invalidation come from Craft (Elements::startCollectingCacheInfo / EVENT_INVALIDATE_CACHES). Every element a template outputs, every element query, and every {% cache %} block served from cache is tracked automatically, including related entries, assets, Matrix/Content Builder entries and Commerce products.",
+    "Header tags are shortened Craft tags: `12` = element 12, `e:s:3` = entries in section 3, `e:t:4` = entry type 4, `e:f:6` = Matrix field 6, `e:any` = unscoped entry query, `e:search` = entry search results, `all` = every page. Type letters: e entry, c category, a asset, u user, t tag, g global set, b content block, ad address, p Commerce product, v Commerce variant. Use studioespresso\\varnish\\helpers\\TagHelper::headerTag($craftTag) to convert a Craft tag.",
+    "To purge from PHP, call `Varnish::getInstance()->purger->ban(array $headerTags, ?int $siteId = null)` with header tags, e.g. `->ban([TagHelper::TAG_ALL])` to purge everything. Prefer `Craft::$app->getElements()->invalidateAllCaches()` or `invalidateCachesForElement($element)` when possible: the plugin listens to those and also keeps Craft's own template caches in sync.",
+    "Data that isn't a Craft element (custom records, plugin settings, menus stored in plugin tables, project config changes such as a new section) does not purge Varnish by itself. Call `Craft::$app->getElements()->invalidateAllCaches()` after changing it, or clear the Varnish cache (Utilities → Caches → Varnish cache, or `php craft clear-caches/varnish`) after a deploy.",
+    "Multi-site: each page carries `X-Cache-Site: <siteId>`. A save that only changes translatable content (translatable fields or title) purges only that site; shared values (untranslatable fields, post date, global status), new elements, and slug/URI/enabled-status changes purge all sites. A page that queries another site's content (`.site('*')`) is not purged by a change scoped to that other site.",
+    "Only front-end GET site requests that return 200 are tagged and cached. Error pages, redirects, previews and CP requests are never cached. Pages past the last page of a {% paginate %} should `{% exit 404 %}` so they aren't cached.",
+    "Craft marks any response that prints a CSRF token as uncacheable (Request::getCsrfToken() sends Cache-Control: no-store), and Varnish honours that. To cache pages with forms, enable `->asyncCsrfInputs(true)` in config/general.php so csrfInput() loads its token with JavaScript; Formie forms use csrfInput() and work with it. Templates that print `craft.app.request.csrfToken` directly still make the page uncacheable.",
+    "For per-visitor or frequently changing parts of a cached page, use ESI: `{{ craft.varnish.include('_partials/stock', {productId: product.id}) }}`. Behind Varnish it outputs an <esi:include> that Varnish fills from a signed, uncached plugin action; without Varnish it renders the template inline. Pass only scalar variables (IDs, strings). ESI fragments cannot set cookies (Varnish ignores fragment headers), so never use ESI for CSRF tokens or anything that must set a cookie.",
+    "Use `asset.getUrl(transform, true)` (generate immediately) for image transforms on cached pages, so the cached HTML contains the final image URL instead of a temporary generate-transform URL that costs every visitor an extra request.",
+    "Craft CP saves update the search index in a queue job after the save; the plugin purges `e:search` pages again when Craft's UpdateSearchIndex job finishes, so search result pages pick up new content once the index is updated.",
+    "To debug, request a page twice while logged out and check the `X-Cache` (HIT/MISS), `X-Cache-Tags` and `X-Cache-Site` response headers; list bans with `varnishadm ban.list`. With devMode on, successful bans are logged as `Varnish banned: …`; failed bans are always logged as `Varnish ban failed for …`. Remove the debug headers in production by uncommenting the `unset resp.http.X-Cache-Tags;` and `unset resp.http.X-Cache-Site;` lines in vcl_deliver."
+  ]
+}
