@@ -11,7 +11,7 @@ The labels are Craft's own element cache tags, the ones behind `{% cache %}`, so
 ## Requirements
 
 - Craft CMS 5, on PHP 8.3 or newer
-- Varnish 6.6 or newer (tested with 7.7), in front of your site
+- Varnish 6.0 or newer in front of your site (tested with 6.0, 6.6 and 7.7)
 - Varnish must be reachable from the Craft server, so it can receive purge requests
 
 ## Installation
@@ -25,7 +25,7 @@ Then set up Varnish and tell the plugin where it lives.
 
 ## 1. Set up Varnish
 
-Start from [`example.vcl`](example.vcl). It:
+Start from [`example.vcl`](example.vcl) on Varnish 6.6 and newer, or from [`example-varnish-6.0.vcl`](example-varnish-6.0.vcl) on Varnish 6.0 (check with `varnishd -V`, `varnishadm banner`, or the `Via` response header). The 6.0 version uses `ban()` instead of `std.ban()`, so a ban Varnish can't parse isn't reported back to Craft; otherwise they're identical. Either one:
 
 - only caches pages the plugin has tagged, and passes everything else (the CP, action requests, previews, logged-in users, non-GET requests) through to Craft
 - strips cookies from cached pages
@@ -49,21 +49,46 @@ Go to **Settings → Plugins → Varnish** and add each Varnish server: its host
 - **The port** is usually 6081 for Varnish from Linux packages, and 80 in Docker. Leave it empty for 80.
 - **Hosts can be environment variables**, like `$VARNISH_HOST`.
 
-Or configure the servers per environment in `config/varnish.php`. This overrides the CP setting and locks the table:
+Or configure the servers in `config/varnish.php`. This overrides the CP setting and locks the table. Use Craft's per-environment format to give each environment (`CRAFT_ENVIRONMENT`) its own servers:
 
 ```php
 <?php
 
+use craft\helpers\App;
+
 return [
-    'purgeUrls' => [
-        craft\helpers\App::env('VARNISH_PURGE_URL') ?: 'http://127.0.0.1:6081',
+    '*' => [],
+    'dev' => [
+        'purgeUrls' => ['http://varnish'],
+    ],
+    'staging' => [
+        'purgeUrls' => [App::env('VARNISH_PURGE_URL') ?: 'http://127.0.0.1:6081'],
+    ],
+    'production' => [
+        'purgeUrls' => ['http://10.0.0.11:6081', 'http://10.0.0.12:6081'],
     ],
 ];
 ```
 
+- Set `purgeUrls` per environment, **not in `'*'` as well**: Craft merges `'*'` into the environment and appends lists, so production would ban on both sets of servers.
+- Environment keys match on substrings: `'prod'` also matches `production`.
+- Leave `purgeUrls` out for an environment to manage its servers in the CP instead.
+
 If no servers are configured, pages are still tagged and cached but nothing is ever purged. A warning is logged each time a purge is skipped.
 
 ## 3. Check that it works
+
+After deploying, check that every configured server accepts bans from this server:
+
+```bash
+php craft varnish/check
+# ✓ http://10.0.0.11:6081: 200 Ban added
+# ✗ http://10.0.0.12:6081: 403 Forbidden: BAN from 10.0.0.5 (not in acl purge)
+```
+
+It sends a harmless test ban (a tag no page carries) and exits with an error code if any server fails, so it can run in a deploy script. When Varnish refuses a ban, the answer names the IP it saw: that's the address to add to `acl purge`.
+
+Then check caching itself:
 
 Request a page twice and look at the headers:
 
@@ -75,7 +100,7 @@ curl -sI https://example.com/news | grep -i x-cache
 # X-Cache: HIT
 ```
 
-Save one of the entries on that page in the CP, and the next request is a `MISS` again. Failed purges are always logged as `Varnish ban failed for …`; with `devMode` on, successful ones are logged too, as `Varnish banned: …`.
+Save one of the entries on that page in the CP, and the next request is a `MISS` again. Every ban is logged per server with Varnish's answer: failures always (`Varnish ban failed (http://… → 403 Forbidden: BAN from 10.0.0.5 …)`), successes with `devMode` on (`Varnish banned: … (http://… → 200 Ban added)`).
 
 ## ESI (Edge Side Includes)
 

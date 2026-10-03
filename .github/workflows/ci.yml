@@ -59,3 +59,20 @@ jobs:
           DB_USER: root
           DB_PASSWORD: root
           DB_PORT: 3306
+
+  vcl:
+    name: vcl (${{ matrix.file }} on Varnish ${{ matrix.varnish }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { file: example.vcl, varnish: '6.6' }
+          - { file: example.vcl, varnish: '7.7' }
+          - { file: example-varnish-6.0.vcl, varnish: '6.0' }
+          - { file: example-varnish-6.0.vcl, varnish: '7.7' }
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile the example VCL
+        # The backend host must resolve at compile time; map the example's `web` to localhost
+        run: docker run --rm --add-host web:127.0.0.1 -v "$PWD/${{ matrix.file }}:/etc/varnish/default.vcl:ro" --entrypoint varnishd varnish:${{ matrix.varnish }} -C -f /etc/varnish/default.vcl > /dev/null

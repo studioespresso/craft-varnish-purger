@@ -100,23 +100,26 @@ class Purger extends Component
     }
 
     /**
-     * Sends a BAN for the given header tags to every configured Varnish instance.
+     * Sends a BAN for the given header tags to every configured Varnish instance, and logs each server's answer:
+     * failures (refused, unreachable, error status) as errors, successes as info (visible with devMode on).
      *
      * @param string[] $tags
      * @param int|null $siteId only ban pages of this site; null bans them on every site
+     * @return array<array{url: string, ok: bool, status: int|null, message: string}> one result per request
      */
-    public function ban(array $tags, ?int $siteId = null): void
+    public function ban(array $tags, ?int $siteId = null): array
     {
         if (!$tags) {
-            return;
+            return [];
         }
         $urls = Varnish::getInstance()->getSettings()->getResolvedPurgeUrls();
         if (!$urls) {
             Craft::warning('Varnish ban skipped: no servers configured (Settings → Plugins → Varnish, or config/varnish.php).', __METHOD__);
-            return;
+            return [];
         }
         // Sent in parallel, so an unreachable server costs one timeout, not one per server and chunk.
-        $client = Craft::createGuzzleClient(['connect_timeout' => 2, 'timeout' => 5]);
+        // http_errors off: a refusal (e.g. 403) is an answer we want to log, not an exception.
+        $client = Craft::createGuzzleClient(['connect_timeout' => 2, 'timeout' => 5, 'http_errors' => false]);
         $requests = [];
         foreach ($urls as $url) {
             // Chunked to stay under Varnish's request header limit.
@@ -128,11 +131,28 @@ class Purger extends Component
                 $requests[] = [$url, $client->requestAsync('BAN', $url, ['headers' => $headers])];
             }
         }
-        foreach (Utils::settle(array_column($requests, 1))->wait() as $i => $result) {
-            if ($result['state'] === 'rejected') {
-                Craft::error("Varnish ban failed for {$requests[$i][0]}: {$result['reason']->getMessage()}", __METHOD__);
+
+        $results = [];
+        $scope = $siteId !== null ? " on site $siteId" : '';
+        foreach (Utils::settle(array_column($requests, 1))->wait() as $i => $settled) {
+            $url = $requests[$i][0];
+            if ($settled['state'] === 'rejected') {
+                // No answer at all: DNS, connection refused, timeout…
+                $result = ['url' => $url, 'ok' => false, 'status' => null, 'message' => $settled['reason']->getMessage()];
+            } else {
+                $response = $settled['value'];
+                $status = $response->getStatusCode();
+                // Our VCL puts the reason in the status line, e.g. "Forbidden: BAN from 10.1.2.3"
+                $result = ['url' => $url, 'ok' => $status === 200, 'status' => $status, 'message' => $response->getReasonPhrase()];
+            }
+            $results[] = $result;
+            $line = sprintf('%s → %s%s', $url, $result['status'] ?? 'no response', $result['message'] !== '' ? " {$result['message']}" : '');
+            if ($result['ok']) {
+                Craft::info("Varnish banned$scope: " . implode(' ', $tags) . " ($line)", __METHOD__);
+            } else {
+                Craft::error("Varnish ban failed$scope ($line) for tags: " . implode(' ', $tags), __METHOD__);
             }
         }
-        Craft::info('Varnish banned' . ($siteId !== null ? " on site $siteId" : '') . ': ' . implode(' ', $tags), __METHOD__);
+        return $results;
     }
 }

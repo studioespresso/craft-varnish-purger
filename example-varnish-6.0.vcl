@@ -1,4 +1,6 @@
-# Minimal VCL for craft-varnish-purger, using core Varnish bans (no vmods needed).
+# Minimal VCL for craft-varnish-purger, for Varnish 6.0 (use example.vcl on 6.6 and newer).
+# Same as example.vcl, except that bans use ban() instead of std.ban(), which only exists since 6.6: a ban
+# Varnish can't parse isn't reported back to Craft (the X-Cache-Tags-Ban header is validated before banning).
 # Only responses tagged by the plugin (X-Cache-Tags header) are cached; everything else passes through untouched.
 vcl 4.1;
 
@@ -49,14 +51,10 @@ sub vcl_recv {
       if (req.http.X-Cache-Site-Ban !~ "^[0-9]+$") {
         return (synth(400, "Invalid X-Cache-Site-Ban header"));
       }
-      if (!std.ban("obj.http.X-Cache-Site == " + req.http.X-Cache-Site-Ban + " && obj.http.X-Cache-Tags ~ (^|[[:space:]])(" + req.http.X-Cache-Tags-Ban + ")([[:space:]]|$)")) {
-        return (synth(500, std.ban_error()));
-      }
+      ban("obj.http.X-Cache-Site == " + req.http.X-Cache-Site-Ban + " && obj.http.X-Cache-Tags ~ (^|[[:space:]])(" + req.http.X-Cache-Tags-Ban + ")([[:space:]]|$)");
       return (synth(200, "Ban added"));
     }
-    if (!std.ban("obj.http.X-Cache-Tags ~ (^|[[:space:]])(" + req.http.X-Cache-Tags-Ban + ")([[:space:]]|$)")) {
-      return (synth(500, std.ban_error()));
-    }
+    ban("obj.http.X-Cache-Tags ~ (^|[[:space:]])(" + req.http.X-Cache-Tags-Ban + ")([[:space:]]|$)");
     return (synth(200, "Ban added"));
   }
 
