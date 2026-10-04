@@ -41,21 +41,27 @@ class Esi extends Component
      */
     public function fragmentPath(string $template, array $variables = []): string
     {
-        // Signed, so the action can't be used to render arbitrary templates with arbitrary variables
-        $data = Craft::$app->getSecurity()->hashData(Json::encode(['t' => $template, 'v' => $variables]));
+        // Signed, so the action can't be used to render arbitrary templates with arbitrary variables. Not encrypted:
+        // the template name and variables are readable in the page source, so don't pass anything secret.
+        // The site goes along because with path-based sites (/nl/…) the action URL may not resolve to it.
+        $data = Craft::$app->getSecurity()->hashData(Json::encode([
+            't' => $template,
+            'v' => $variables,
+            's' => Craft::$app->getSites()->getCurrentSite()->id,
+        ]));
         $url = UrlHelper::actionUrl('varnish/esi/render', ['data' => $data]);
         $parts = parse_url($url);
         return ($parts['path'] ?? '/') . (isset($parts['query']) ? '?' . $parts['query'] : '');
     }
 
     /**
-     * @return array{t: string, v: array}|null the template and variables, or null if the data was tampered with
+     * @return array{t: string, v: array, s: int|null}|null the template, variables and site ID, or null if the data was tampered with
      */
     public function decode(string $data): ?array
     {
         $json = Craft::$app->getSecurity()->validateData($data);
         $decoded = $json !== false ? Json::decodeIfJson($json) : null;
-        return is_array($decoded) && is_string($decoded['t'] ?? null) ? ['t' => $decoded['t'], 'v' => (array)($decoded['v'] ?? [])] : null;
+        return is_array($decoded) && is_string($decoded['t'] ?? null) ? ['t' => $decoded['t'], 'v' => (array)($decoded['v'] ?? []), 's' => is_int($decoded['s'] ?? null) ? $decoded['s'] : null] : null;
     }
 
     private function isEsiCapable(): bool

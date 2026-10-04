@@ -20,7 +20,9 @@ hosting. Never assume a setup works because Craft is configured: verify it with 
    - the tags stored with any `{% cache %}` block that's served from cache.
    Collection starts at `View::EVENT_BEFORE_RENDER_PAGE_TEMPLATE` on purpose: Craft's route lookup (an unscoped `uri`
    query) runs before that and would otherwise give every page `Entry::*`, purged by every entry save.
-2. **Response headers.** On a `200` response the plugin adds:
+2. **Response headers.** On a `200` response that isn't private (`Cache-Control: no-store`/`private`, also from a PHP
+   session start) and whose tag header stays under `maxTagsHeaderLength` (4000 bytes; longer pages are left untagged,
+   so uncached, with a warning: an over-long header fails the response in Varnish or an nginx in between), the plugin adds:
    - `X-Cache-Tags: all e 12 e:s:3 …` — the shortened tags (see below), `all` on every page;
    - `X-Cache-Site: 1` — the Craft site ID;
    - `X-Cache-Ttl: 86400` — Craft's suggested lifetime (shorter when a shown entry has an expiry date), the VCL turns
@@ -29,8 +31,10 @@ hosting. Never assume a setup works because Craft is configured: verify it with 
    actions, previews, POSTs, logged-in users) passes through uncached. It strips cookies from cacheable requests and
    `Set-Cookie` from cached responses, and stores the hostname as `X-Cache-Host` (hidden from visitors).
 4. **Invalidation.** Craft fires `Elements::EVENT_INVALIDATE_CACHES` on save, delete, restore, move and Matrix owner
-   changes, with exactly the tags to clear. The plugin queues them and, at the end of the request, sends one `BAN` per
-   configured server (in parallel, chunked per 100 tags):
+   changes, with exactly the tags to clear. The plugin queues them and, at the end of the request (and after every queue
+   job, since a `queue/listen` worker never ends its request; a shutdown function catches requests that ended in an
+   exception), sends one `BAN` per configured server, site scope and chunk of 100 tags, all in parallel. Exceptions
+   while banning are logged, never thrown, so a failed ban can't turn a successful save into an error page:
    ```
    BAN https://www.example.com/
    X-Cache-Tags-Ban: 45|e:s:3|e:t:1|e:any
@@ -64,7 +68,8 @@ other plugins via `ElementQuery::EVENT_DEFINE_CACHE_TAGS`) is squeezed into `[A-
 
 ## Invalidation rules and their edge cases
 
-- **Drafts and revisions** never purge (autosaves would empty the cache otherwise).
+- **Drafts and revisions** never purge (autosaves would empty the cache otherwise), and neither do their search index
+  jobs. Needs Craft 5.2+ (`InvalidateElementCachesEvent::$element`).
 - **Relation fields.** Craft gives relation field queries the catch-all `*` tag, which would purge every page using a
   relation field on any save. The plugin narrows Entries fields to their sections and Categories fields to their group
   (`PageTags::scopeRelationQuery()`). Only plain `section:`/`group:` sources are narrowed; other sources keep `*`.
@@ -73,7 +78,9 @@ other plugins via `ElementQuery::EVENT_DEFINE_CACHE_TAGS`) is squeezed into `[A-
   values to the other sites: untranslatable fields (relation fields are shared by default), post date, global status,
   new elements, and slug/URI/enabled-status changes (other sites link to this version, e.g. language switchers via
   `entry.localized`). `Purger::isSiteSpecificChange()` decides this from the element's dirty attributes/fields, which
-  are reliable at invalidation time, including for CP saves that apply a draft. Limitation: a page that queries another
+  are reliable at invalidation time. Applying a draft is the exception: Craft fires one invalidation, for the
+  draft's own site, with only that site's changes, so the plugin also checks the draft's `changedattributes`/
+  `changedfields` rows and bans all sites when another site changed too (verified on a two-site install). Limitation: a page that queries another
   site's content (`.site('*')`) is not purged by a change scoped to that other site.
 - **Search.** CP saves (web requests) update Craft's search index in a queue job *after* the save and its purge. A
   search page re-cached in between would miss the new content, so search queries get an extra `e:search` tag and the
@@ -134,11 +141,19 @@ as a long-term-support release; it uses `ban()` because `std.ban()`/`std.ban_err
 that fails to parse isn't reported back). The two files differ only in their header comment and the ban call; CI
 compiles both. Things that must stay true in any adapted VCL:
 
-- Cache only responses with `X-Cache-Tags`; mark everything else `uncacheable`.
-- Pass the CP, `/actions`, previews/tokens, non-GET/HEAD, `Authorization`, and logged-in users (Craft's `_identity`
-  cookie — not `CraftSessionId`, which anonymous visitors get too).
+- Cache only responses with `X-Cache-Tags` that aren't `no-store`/`private`; mark everything else `uncacheable`.
+- **Drop the request headers Craft (Yii) trusts to build the URL, host or site** before anything else: `X-Rewrite-Url`,
+  `X-Original-Url`, `X-Original-Host`, `X-Forwarded-Host`, `X-Forwarded-Port`, `X-Forwarded-Server`, `Forwarded`,
+  `Front-End-Https` and `X-Craft-Site`. Craft's default `trustedHosts` is `any`, and Varnish hashes on URL + Host only,
+  so `curl -H 'X-Rewrite-Url: /contact' https://site/news` would otherwise store the contact page as `/news` (verified).
+  `X-Forwarded-Proto` stays (TLS-terminating proxies need it) but is added to the hash in `vcl_hash`. Also recommend
+  setting `trustedHosts` to the Varnish/proxy IPs, for requests that reach Craft without passing through Varnish.
+- Pass the CP and `/actions` (also behind a site path prefix like `/nl/actions`; adjust `admin` for a custom
+  `cpTrigger`), tokens (`token`, `siteToken`, preview params and the `X-Craft-Token`, `X-Craft-Preview-Token`,
+  `X-Craft-Site-Token` headers), non-GET/HEAD, `Authorization`, and logged-in users (Craft's `_identity` cookie — not
+  `CraftSessionId`, which anonymous visitors get too). The `novarnish` pipe is for ddev only.
 - Strip `Cookie` on cacheable requests and `Set-Cookie` on cached responses. A commented-out **cookie keep-list** in
-  `vcl_recv` plus a `vcl_hash` block show how to keep a cookie the backend renders differently for (e.g. a consent
+  `vcl_recv` plus commented lines in `vcl_hash` show how to keep a cookie the backend renders differently for (e.g. a consent
   choice) and cache one copy per value; only for cookies with a few possible values. Enable both or neither.
 - Handle `BAN` before anything else that could catch it, check the sender, validate the headers
   (`X-Cache-Tags-Ban` must match `^[A-Za-z0-9:._|-]+$`, site `^[0-9]+$`, hosts `^[a-z0-9.-]+(\|[a-z0-9.-]+)*$`) so
@@ -197,12 +212,18 @@ denial of service). Which IP to check depends on how requests reach Varnish:
   `csrfInput()` then outputs `<craft-csrf-input>` and Craft's JS fetches the token (and sets the cookie) from
   `/actions/users/session-info`. Formie's form template uses `csrfInput()`, so Formie works with it; captcha tokens are
   not covered (use Formie's `refreshForCache()`). Templates printing `craft.app.request.csrfToken` directly still make
-  the page uncacheable — that's safe, just not cached.
+  the page `no-store`: the plugin doesn't tag it and the VCL doesn't cache it (before both checks existed, such a
+  page was cached with its `Set-Cookie` stripped, so every form post failed CSRF validation).
 - **ESI:** `{{ craft.varnish.include('_partials/stock', {productId: product.id}) }}`. Behind Varnish (request header
   `Surrogate-Capability: …ESI/1.0`, set by the VCL) it outputs `<esi:include src="/actions/varnish/esi/render?data=…">`
   and sets `Surrogate-Control: content="ESI/1.0"` so the VCL enables `do_esi`; elsewhere it renders inline. The data is
   signed with Craft's security key (`Security::hashData()`), so the action can't render arbitrary templates; tampered
-  data gets a 400. Fragments are action requests: never tagged, never cached. Pass scalars only. **Fragments cannot set
+  data gets a 400. Signed, not encrypted: template name and variables are readable, so nothing secret. The payload
+  carries the page's site ID and the action switches to it (with path-based sites the action URL may resolve to the
+  primary site). A fragment that throws returns an empty 500 body and logs the error (rethrown in devMode), so no
+  error page ends up inside the page. Any response containing `<esi:include` gets `Surrogate-Control` too, so includes
+  inside a `{% cache %}` block (which skip `include()`) still work. Fragments are action requests: never tagged, never
+  cached. Pass scalars only. **Fragments cannot set
   cookies** (Varnish ignores fragment response headers): never use ESI for CSRF tokens.
 - **Image transforms:** use `asset.getUrl(transform, true)` on cached pages so the cached HTML holds the final URL, not
   a temporary generate-transform URL.

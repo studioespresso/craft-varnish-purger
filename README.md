@@ -20,7 +20,7 @@ The labels are Craft's own element cache tags, the ones behind `{% cache %}`, so
 
 ## Requirements
 
-- Craft CMS 5, on PHP 8.3 or newer
+- Craft CMS 5.2 or newer, on PHP 8.3 or newer
 - Varnish 6.0 or newer in front of your site (tested with 6.0, 6.6 and 7.7)
 - Varnish must be reachable from the Craft server, so it can receive purge requests
 
@@ -37,8 +37,10 @@ Then set up Varnish and tell the plugin where it lives.
 
 Start from [`example.vcl`](example.vcl) on Varnish 6.6 and newer, or from [`example-varnish-6.0.vcl`](example-varnish-6.0.vcl) on Varnish 6.0 (check with `varnishd -V`, `varnishadm banner`, or the `Via` response header). The 6.0 version uses `ban()` instead of `std.ban()`, so a ban Varnish can't parse isn't reported back to Craft; otherwise they're identical. Either one:
 
-- only caches pages the plugin has tagged, and passes everything else (the CP, action requests, previews, logged-in users, non-GET requests) through to Craft
+- only caches pages the plugin has tagged, and passes everything else (the CP, action requests, previews and other token requests, logged-in users, non-GET requests) through to Craft
+- never caches private responses (`Cache-Control: no-store` or `private`)
 - strips cookies from cached pages
+- drops request headers Craft would use to change the URL, host or site (`X-Forwarded-Host`, `X-Rewrite-Url`, `X-Craft-Site` and the like), so a crafted request can't store a different page under a normal URL. `X-Forwarded-Proto` is kept and becomes part of the cache key.
 - accepts purge requests (`BAN`) only from the IP addresses in `acl purge`, and only when they're sent directly rather than relayed through a proxy or load balancer
 - adds an `X-Cache: HIT/MISS` header, handy while testing
 
@@ -49,6 +51,10 @@ Adapt these before going live:
 | `backend default` | the host and port of your web server |
 | `acl purge` | the IP addresses of your Craft server(s) only |
 | `# unset resp.http.X-Cache-Tags;` and `# unset resp.http.X-Cache-Site;` | uncomment them, so visitors don't see the tags |
+| `admin` in the `(admin\|actions\|index\.php)` pass rule | your `cpTrigger`, if you changed it |
+| the `novarnish` block | remove it: it's for ddev only |
+
+Also set Craft's `trustedHosts` config setting to the IP addresses of Varnish (and any proxy in front of Craft). By default Craft trusts forwarded headers from any client. The example VCL drops the risky ones, but a request that reaches Craft without passing through Varnish still gets them trusted.
 
 ## 2. Tell Craft where Varnish lives
 
@@ -98,7 +104,9 @@ Two more options, for hosting setups (config file only):
 ],
 ```
 
-If no servers are configured, pages are still tagged and cached but nothing is ever purged. A warning is logged each time a purge is skipped.
+If no servers are configured, pages are still tagged and cached but nothing is ever purged (logged at info level, so visible with `devMode` on).
+
+Pages with a lot of tags (long listings showing hundreds of elements) are not tagged, and so not cached, once the `X-Cache-Tags` header would exceed `maxTagsHeaderLength` (4000 bytes by default). A warning is logged. A header over Varnish's `http_resp_hdr_len` (8 KB by default), or over the header buffer of a proxy in between, would fail the whole response. Raise the setting together with those limits if needed.
 
 ## 3. Check that it works
 
@@ -135,8 +143,10 @@ Render part of a cached page in its own request, so it can change on every page 
 ```
 
 - Behind Varnish this outputs an `<esi:include>` tag, which Varnish replaces with the fragment. Anywhere else (no Varnish, `novarnish.` hosts, console) the template is rendered inline, so templates work either way.
-- The fragment is rendered by a plugin action (`/actions/varnish/esi/render`). Its parameters are signed with Craft's security key, so it can't be used to render arbitrary templates. It's never cached.
+- The fragment is rendered by a plugin action (`/actions/varnish/esi/render`). Its parameters are signed with Craft's security key, so it can't be used to render arbitrary templates. They're not encrypted, though: the template name and variables are readable in the page source, so don't pass anything secret. It's never cached.
 - Pass simple values only (IDs, strings): the fragment is rendered in a separate request, on the same site as the page.
+- If a fragment fails to render, Varnish gets an empty fragment and the error is logged (with `devMode` on, you see the error instead).
+- An include inside a `{% cache %}` block works too: the plugin asks Varnish to process any response that contains an `<esi:include>` tag.
 - Varnish drops the headers of ESI fragments, so a fragment can't set cookies. Don't use it for CSRF tokens: enable Craft's `asyncCsrfInputs` instead.
 
 `example.vcl` handles both sides: it sets `Surrogate-Capability` on requests (so Craft knows it can output ESI tags), and processes responses that send `Surrogate-Control: content="ESI/1.0"`.
@@ -181,11 +191,11 @@ Some details:
 - **Search results:** pages that use `.search()` are also tagged `e:search`. CP saves update Craft's search index in a queue job after the save (and after its purge), so the plugin purges search pages again once that job has run. Otherwise a search re-cached in between would miss the new content.
 - **Expiry dates:** pages are cached until the nearest expiry date of an entry they show, or for Craft's `cacheDuration` (1 day by default).
 - **Multi-site:** each page also carries its site ID (`X-Cache-Site`). When a save only changes translatable content (translatable fields, a translatable title), only that site's pages are purged. Anything else purges the affected pages on every site: shared values like untranslatable fields or the post date (Craft copies those to the other sites), new entries, and changes to a version's slug, URI or enabled status (other sites link to it, e.g. from a language switcher). One exception: a page that shows another site's content (`craft.entries.site('*')`) isn't purged by a change limited to that other site.
-- **What gets tagged:** only front-end `GET` requests that return `200`. Error pages, redirects, CP requests and previews are never tagged, so Varnish doesn't cache them.
+- **What gets tagged:** only front-end `GET` requests that return `200` and aren't private. Error pages, redirects, CP requests, previews, token requests and responses sent with `Cache-Control: no-store` or `private` (for example a page that outputs `csrfInput()` without `asyncCsrfInputs`) are never tagged, so Varnish doesn't cache them.
 
 ## Purge requests
 
-When content changes, the plugin collects the tags Craft invalidates and, at the end of the request, sends one request to each Varnish server:
+When content changes, the plugin collects the tags Craft invalidates and, at the end of the request (or after each queue job, for queue workers), sends one request to each Varnish server:
 
 ```
 BAN http://127.0.0.1:6081/
@@ -201,9 +211,9 @@ Varnish then drops every cached page carrying one of those tags, whatever its UR
 ## Known limitations
 
 - **Future post dates:** an entry scheduled to go live doesn't trigger a purge when it does. Listings pick it up once their cached copy expires.
-- **Forms and CSRF tokens:** a cached page contains the same CSRF token for every visitor. Load forms or tokens dynamically on cached pages.
+- **Forms and CSRF tokens:** Craft marks a page that outputs a CSRF token as private, so it isn't cached. Turn on Craft's `asyncCsrfInputs` to cache pages with forms: `csrfInput()` then loads its token with JavaScript.
 - **No retries:** a server that misses a purge keeps its old pages until they expire or the cache is cleared.
-- **Bulk resaves:** every save adds a ban, so resaving thousands of entries adds a lot. Varnish's ban lurker clears them in the background; keep an eye on `varnishadm ban.list` during large imports.
+- **Bulk resaves:** bans are merged per request or queue job, so a resave adds one ban per job, not per element. A long import that runs as many jobs still adds many; Varnish's ban lurker clears them in the background. Keep an eye on `varnishadm ban.list` during large imports.
 
 ## Development
 

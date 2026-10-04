@@ -3,13 +3,18 @@
 namespace studioespresso\varnish\services;
 
 use Craft;
+use craft\base\Element;
 use craft\base\ElementInterface;
+use craft\db\Query;
+use craft\db\Table;
 use craft\events\InvalidateElementCachesEvent;
 use craft\helpers\ElementHelper;
 use craft\queue\jobs\UpdateSearchIndex;
+use GuzzleHttp\Promise\Create;
 use GuzzleHttp\Promise\Utils;
 use studioespresso\varnish\helpers\TagHelper;
 use studioespresso\varnish\Varnish;
+use Throwable;
 use yii\base\Component;
 
 /**
@@ -26,7 +31,7 @@ class Purger extends Component
     public function queue(InvalidateElementCachesEvent $e): void
     {
         // Live pages never depend on drafts/revisions; skipping them avoids a ban on every autosave.
-        if ($e->element && ElementHelper::isDraftOrRevision($e->element)) {
+        if ($e->element && self::isDraftOrRevision($e->element)) {
             return;
         }
         $scope = $e->element && self::isSiteSpecificChange($e->element) ? $e->element->siteId : self::ALL_SITES;
@@ -40,6 +45,15 @@ class Purger extends Component
      */
     public function queueSearchIndexed(UpdateSearchIndex $job): void
     {
+        // Saving a draft also updates its search index; live search results don't change
+        try {
+            $element = Craft::$app->getElements()->getElementById($job->elementId, $job->elementType, '*');
+        } catch (Throwable) {
+            $element = null;
+        }
+        if ($element && self::isDraftOrRevision($element)) {
+            return;
+        }
         $scope = is_numeric($job->siteId) ? (int)$job->siteId : self::ALL_SITES;
         $this->pending[$scope][TagHelper::headerTag("element::$job->elementType::" . PageTags::SEARCH_TAG)] = true;
     }
@@ -58,8 +72,19 @@ class Purger extends Component
     {
         $attributes = $element->getDirtyAttributes();
         $fields = $element->getDirtyFields();
+        // 'id' is dirty on a newly saved element
         if ((!$attributes && !$fields) || in_array('id', $attributes, true)) {
             return false;
+        }
+        // Applying a draft: Craft only reports the changes on the draft's own site, but it may have changed others
+        if ($element instanceof Element && $element->updatingFromDerivative && $element->duplicateOf) {
+            $otherSites = ['and', ['elementId' => $element->duplicateOf->id], ['not', ['siteId' => $element->siteId]]];
+            if (
+                (new Query())->from(Table::CHANGEDATTRIBUTES)->where($otherSites)->exists() ||
+                (new Query())->from(Table::CHANGEDFIELDS)->where($otherSites)->exists()
+            ) {
+                return false;
+            }
         }
         foreach ($attributes as $attribute) {
             // Slug, URI and enabled status aren't site-specific here: other sites link to this version (a
@@ -86,16 +111,29 @@ class Purger extends Component
         return array_map(fn(array $tags) => array_map('strval', array_keys($tags)), $this->pending);
     }
 
-    // ponytail: bans synchronously at the end of the request; move to a queue job if Varnish is slow/remote.
+    /**
+     * Bans the queued tags. Runs after each web request, console command and queue job; any exception is logged,
+     * so a failed ban never turns a successful save into an error page.
+     *
+     * ponytail: bans synchronously at the end of the request; move to a queue job if Varnish is slow/remote.
+     */
     public function flush(): void
     {
         $pending = $this->getPending();
         $this->pending = [];
-        $everywhere = $pending[self::ALL_SITES] ?? [];
-        unset($pending[self::ALL_SITES]);
-        $this->ban($everywhere);
-        foreach ($pending as $siteId => $tags) {
-            $this->ban(array_values(array_diff($tags, $everywhere)), (int)$siteId);
+        if (!$pending) {
+            return;
+        }
+        try {
+            $everywhere = $pending[self::ALL_SITES] ?? [];
+            unset($pending[self::ALL_SITES]);
+            $groups = [[$everywhere, null]];
+            foreach ($pending as $siteId => $tags) {
+                $groups[] = [array_values(array_diff($tags, $everywhere)), (int)$siteId];
+            }
+            $this->send($groups);
+        } catch (Throwable $e) {
+            Craft::error('Varnish ban failed: ' . $e->getMessage(), __METHOD__);
         }
     }
 
@@ -109,47 +147,59 @@ class Purger extends Component
      */
     public function ban(array $tags, ?int $siteId = null): array
     {
-        if (!$tags) {
+        return $this->send([[$tags, $siteId]]);
+    }
+
+    /**
+     * @param array<array{0: string[], 1: int|null}> $groups tags and the site to limit them to (null: every site)
+     * @return array<array{url: string, ok: bool, status: int|null, message: string}>
+     */
+    private function send(array $groups): array
+    {
+        $groups = array_filter($groups, fn(array $group) => $group[0]);
+        if (!$groups) {
             return [];
         }
         $settings = Varnish::getInstance()->getSettings();
         $urls = $settings->getResolvedPurgeUrls();
         $hostnames = $settings->getResolvedHostnames();
         if (!$urls) {
-            Craft::warning('Varnish ban skipped: no servers configured (Settings → Plugins → Varnish, or config/varnish.php).', __METHOD__);
+            Craft::info('Varnish ban skipped: no servers configured (Settings → Plugins → Varnish, or config/varnish.php).', __METHOD__);
             return [];
         }
-        // Sent in parallel, so an unreachable server costs one timeout, not one per server and chunk.
+        // Sent in parallel, so an unreachable server costs one timeout, not one per server, site and chunk.
         // http_errors off: a refusal (e.g. 403) is an answer we want to log, not an exception.
         $client = Craft::createGuzzleClient(['connect_timeout' => 2, 'timeout' => 5, 'http_errors' => false]);
         $requests = [];
+        $promises = [];
         foreach ($urls as $url) {
-            // Chunked to stay under Varnish's request header limit.
-            foreach (array_chunk($tags, 100) as $chunk) {
-                $headers = ['X-Cache-Tags-Ban' => implode('|', $chunk)];
-                if ($siteId !== null) {
-                    $headers[PageTags::SITE_HEADER . '-Ban'] = (string)$siteId;
+            $options = [];
+            if ($resolve = $settings->getCurlResolveFor($url)) {
+                // Connect to the configured IP, keeping the hostname for routing and the TLS certificate
+                $options['curl'] = [CURLOPT_RESOLVE => $resolve];
+            }
+            foreach ($groups as [$tags, $siteId]) {
+                // Chunked to stay under Varnish's request header limit.
+                foreach (array_chunk($tags, 100) as $chunk) {
+                    $options['headers'] = self::banHeaders($chunk, $siteId, $hostnames);
+                    $requests[] = [$url, $chunk, $siteId];
+                    try {
+                        $promises[] = $client->requestAsync('BAN', $url, $options);
+                    } catch (Throwable $e) {
+                        // E.g. a malformed URL from an environment variable
+                        $promises[] = Create::rejectionFor($e);
+                    }
                 }
-                if ($hostnames) {
-                    // Only this install's pages, when other sites share the Varnish
-                    $headers['X-Cache-Hosts-Ban'] = implode('|', $hostnames);
-                }
-                $options = ['headers' => $headers];
-                if ($resolve = $settings->getCurlResolveFor($url)) {
-                    // Connect to the configured IP, keeping the hostname for routing and the TLS certificate
-                    $options['curl'] = [CURLOPT_RESOLVE => $resolve];
-                }
-                $requests[] = [$url, $client->requestAsync('BAN', $url, $options)];
             }
         }
 
         $results = [];
-        $scope = $siteId !== null ? " on site $siteId" : '';
-        foreach (Utils::settle(array_column($requests, 1))->wait() as $i => $settled) {
-            $url = $requests[$i][0];
+        foreach (Utils::settle($promises)->wait() as $i => $settled) {
+            [$url, $tags, $siteId] = $requests[$i];
             if ($settled['state'] === 'rejected') {
                 // No answer at all: DNS, connection refused, timeout…
-                $result = ['url' => $url, 'ok' => false, 'status' => null, 'message' => $settled['reason']->getMessage()];
+                $reason = $settled['reason'];
+                $result = ['url' => $url, 'ok' => false, 'status' => null, 'message' => $reason instanceof Throwable ? $reason->getMessage() : (string)$reason];
             } else {
                 $response = $settled['value'];
                 $status = $response->getStatusCode();
@@ -157,6 +207,7 @@ class Purger extends Component
                 $result = ['url' => $url, 'ok' => $status === 200, 'status' => $status, 'message' => $response->getReasonPhrase()];
             }
             $results[] = $result;
+            $scope = $siteId !== null ? " on site $siteId" : '';
             $line = sprintf('%s → %s%s', $url, $result['status'] ?? 'no response', $result['message'] !== '' ? " {$result['message']}" : '');
             if ($result['ok']) {
                 Craft::info("Varnish banned$scope: " . implode(' ', $tags) . " ($line)", __METHOD__);
@@ -165,5 +216,38 @@ class Purger extends Component
             }
         }
         return $results;
+    }
+
+    /**
+     * Headers of one BAN request, as the example VCL reads them.
+     *
+     * @param string[] $tags
+     * @param string[] $hostnames
+     * @return array<string, string>
+     */
+    public static function banHeaders(array $tags, ?int $siteId, array $hostnames): array
+    {
+        $headers = ['X-Cache-Tags-Ban' => implode('|', $tags)];
+        if ($siteId !== null) {
+            $headers[PageTags::SITE_HEADER . '-Ban'] = (string)$siteId;
+        }
+        if ($hostnames) {
+            // Only this install's pages, when other sites share the Varnish
+            $headers['X-Cache-Hosts-Ban'] = implode('|', $hostnames);
+        }
+        return $headers;
+    }
+
+    /**
+     * ElementHelper::isDraftOrRevision() walks up to the root owner, which throws for an orphaned nested element;
+     * ban for those rather than fail the save.
+     */
+    private static function isDraftOrRevision(ElementInterface $element): bool
+    {
+        try {
+            return ElementHelper::isDraftOrRevision($element);
+        } catch (Throwable) {
+            return false;
+        }
     }
 }

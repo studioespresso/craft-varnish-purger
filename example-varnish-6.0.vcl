@@ -23,7 +23,7 @@ acl purge {
 }
 
 sub vcl_recv {
-  # DDEV: novarnish.* bypasses Varnish.
+  # DDEV only (remove in production): novarnish.* bypasses Varnish.
   if (req.http.Host ~ "^novarnish\.") {
     return (pipe);
   }
@@ -34,6 +34,19 @@ sub vcl_recv {
   if (req.esi_level == 0) {
     set req.http.Surrogate-Capability = {"varnish="ESI/1.0""};
   }
+
+  # Craft (Yii) builds the URL, host and site from these headers. Varnish caches by URL + Host only, so a request
+  # carrying them could store a different page under a normal URL (cache poisoning): drop them.
+  # X-Forwarded-Proto stays (TLS-terminating proxies set it), but is part of the hash, see vcl_hash.
+  unset req.http.X-Rewrite-Url;
+  unset req.http.X-Original-Url;
+  unset req.http.X-Original-Host;
+  unset req.http.X-Forwarded-Host;
+  unset req.http.X-Forwarded-Port;
+  unset req.http.X-Forwarded-Server;
+  unset req.http.Forwarded;
+  unset req.http.Front-End-Https;
+  unset req.http.X-Craft-Site;
 
   if (req.method == "BAN") {
     # A proxy/load balancer also connects from an internal IP. Varnish appends client.ip to X-Forwarded-For,
@@ -74,8 +87,11 @@ sub vcl_recv {
   if (
     (req.method != "GET" && req.method != "HEAD") ||
     req.http.Authorization ||
-    req.url ~ "^/(admin|actions|index\.php)" ||
-    req.url ~ "[?&](token|x-craft-preview|x-craft-live-preview)=" ||
+    # The CP and action requests, also behind a site prefix like /nl. Change "admin" if you set cpTrigger.
+    req.url ~ "^(/[^/]+)?/(admin|actions|index\.php)(/|$|\?)" ||
+    # Tokens (previews, shared drafts, site tokens)
+    req.url ~ "[?&](token|siteToken|x-craft-preview|x-craft-live-preview)=" ||
+    req.http.X-Craft-Token || req.http.X-Craft-Preview-Token || req.http.X-Craft-Site-Token ||
     req.http.Cookie ~ "_identity="
   ) {
     return (pass);
@@ -97,13 +113,15 @@ sub vcl_recv {
   return (hash);
 }
 
-# Enable together with the cookie keep-list in vcl_recv: one cached copy per value of the kept cookies.
-# sub vcl_hash {
-#   if (req.http.Cookie) {
-#     hash_data(req.http.Cookie);
-#   }
-#   # no return: Varnish then also hashes URL + host as usual
-# }
+sub vcl_hash {
+  # Craft builds absolute URLs with the scheme from X-Forwarded-Proto: keep http and https copies apart
+  hash_data(req.http.X-Forwarded-Proto);
+  # Enable together with the cookie keep-list in vcl_recv: one cached copy per value of the kept cookies.
+  # if (req.http.Cookie) {
+  #   hash_data(req.http.Cookie);
+  # }
+  # no return: Varnish then also hashes URL + host as usual
+}
 
 sub vcl_backend_response {
   # Responses that contain <esi:include> tags ask for processing; each include is fetched as its own request
@@ -112,7 +130,8 @@ sub vcl_backend_response {
     set beresp.do_esi = true;
   }
 
-  if (!beresp.http.X-Cache-Tags) {
+  # Untagged, or tagged but private (e.g. a page that output a CSRF token without asyncCsrfInputs): don't cache
+  if (!beresp.http.X-Cache-Tags || beresp.http.Cache-Control ~ "(no-store|private)") {
     set beresp.uncacheable = true;
     set beresp.ttl = 120s;
     return (deliver);

@@ -20,7 +20,7 @@
   ],
   "require": {
     "php": "^8.3",
-    "craftcms/cms": "^5.0"
+    "craftcms/cms": "^5.2"
   },
   "require-dev": {
     "codeception/codeception": "^5.0.0",

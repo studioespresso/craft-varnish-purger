@@ -18,7 +18,9 @@ use craft\models\FieldLayoutTab;
 use craft\models\Section;
 use craft\models\Section_SiteSettings;
 use craft\queue\jobs\UpdateSearchIndex;
+use craft\web\Response;
 use craft\web\View;
+use studioespresso\varnish\services\PageTags;
 use studioespresso\varnish\services\Purger;
 use studioespresso\varnish\Varnish;
 use yii\queue\ExecEvent;
@@ -129,10 +131,76 @@ class TaggingTest extends Unit
 
     public function testFinishedSearchIndexJobBansSearchPages(): void
     {
-        $job = new UpdateSearchIndex(['elementType' => Entry::class, 'elementId' => $this->article->id, 'siteId' => $this->article->siteId]);
-        Craft::$app->getQueue()->trigger(Queue::EVENT_AFTER_EXEC, new ExecEvent(['job' => $job]));
+        $this->plugin->purger->queueSearchIndexed($this->searchJob($this->article));
 
         $this->assertSame(['e:search'], $this->plugin->purger->getPending()[$this->article->siteId] ?? []);
+    }
+
+    public function testDraftSearchIndexJobIsIgnored(): void
+    {
+        $draft = Craft::$app->getDrafts()->createDraft($this->article);
+        $this->plugin->purger->queueSearchIndexed($this->searchJob($draft));
+
+        $this->assertSame([], $this->plugin->purger->getPending());
+    }
+
+    public function testQueueJobsFlushTheirBans(): void
+    {
+        // A `queue/listen` worker never ends its request, so bans go out after each job
+        Craft::$app->getElements()->saveElement($this->topic);
+        $this->assertNotSame([], $this->plugin->purger->getPending());
+        Craft::$app->getQueue()->trigger(Queue::EVENT_AFTER_EXEC, new ExecEvent(['job' => $this->searchJob($this->article)]));
+
+        $this->assertSame([], $this->plugin->purger->getPending());
+    }
+
+    public function testResponseGetsTagHeaders(): void
+    {
+        $this->render('_list');
+        $response = $this->prepare(new Response());
+
+        $this->assertStringContainsString("e:s:{$this->news->id}", (string)$response->getHeaders()->get(PageTags::HEADER));
+        $this->assertSame((string)Craft::$app->getSites()->getCurrentSite()->id, $response->getHeaders()->get(PageTags::SITE_HEADER));
+    }
+
+    public function testPrivateResponseIsNotTagged(): void
+    {
+        $this->render('_list');
+        $response = new Response();
+        $response->getHeaders()->set('Cache-Control', 'no-cache, no-store, must-revalidate');
+
+        $this->assertNull($this->prepare($response)->getHeaders()->get(PageTags::HEADER));
+    }
+
+    public function testErrorResponseIsNotTagged(): void
+    {
+        $this->render('_list');
+        $response = new Response();
+        $response->setStatusCode(404);
+
+        $this->assertNull($this->prepare($response)->getHeaders()->get(PageTags::HEADER));
+    }
+
+    public function testOversizedTagHeaderIsNotSent(): void
+    {
+        $this->render('_list');
+        $settings = $this->plugin->getSettings();
+        $max = $settings->maxTagsHeaderLength;
+        $settings->maxTagsHeaderLength = 10;
+        try {
+            $this->assertNull($this->prepare(new Response())->getHeaders()->get(PageTags::HEADER));
+        } finally {
+            $settings->maxTagsHeaderLength = $max;
+        }
+    }
+
+    public function testEsiTagFromCacheBlockAsksForEsiProcessing(): void
+    {
+        // e.g. an `<esi:include>` served from a {% cache %} block, which skips craft.varnish.include()
+        $response = new Response();
+        $response->content = '<p>Hi</p><esi:include src="/actions/varnish/esi/render?data=x" />';
+
+        $this->assertSame('content="ESI/1.0"', $this->prepare($response)->getHeaders()->get('Surrogate-Control'));
     }
 
     public function testSavingAnEntryBansItsTags(): void
@@ -194,6 +262,17 @@ class TaggingTest extends Unit
         Craft::$app->getDrafts()->createDraft($this->topic);
 
         $this->assertSame([], $this->plugin->purger->getPending());
+    }
+
+    private function searchJob(Entry $entry): UpdateSearchIndex
+    {
+        return new UpdateSearchIndex(['elementType' => Entry::class, 'elementId' => $entry->id, 'siteId' => $entry->siteId]);
+    }
+
+    private function prepare(Response $response): Response
+    {
+        $this->plugin->pageTags->prepareResponse($response);
+        return $response;
     }
 
     private function render(string $template, array $variables = []): array

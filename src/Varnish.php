@@ -50,7 +50,9 @@ class Varnish extends Plugin
             $request->getIsSiteRequest() &&
             $request->getIsGet() &&
             !$request->getIsActionRequest() &&
-            !$request->getIsPreview()
+            !$request->getIsPreview() &&
+            // Tokens can route to other content (shared drafts, custom token routes) under a normal URL
+            !$request->getHadToken()
         ) {
             $this->pageTags->track();
         }
@@ -61,8 +63,13 @@ class Varnish extends Plugin
             if ($e->job instanceof UpdateSearchIndex) {
                 $this->purger->queueSearchIndexed($e->job);
             }
+            // Ban after every job: a `queue/listen` worker never ends its request
+            $this->purger->flush();
         });
+        Event::on(Queue::class, Queue::EVENT_AFTER_ERROR, fn() => $this->purger->flush());
         Craft::$app->on(Application::EVENT_AFTER_REQUEST, fn() => $this->purger->flush());
+        // Requests that end in an exception skip EVENT_AFTER_REQUEST, but may have saved something first
+        register_shutdown_function(fn() => $this->purger->flush());
 
         Event::on(CraftVariable::class, CraftVariable::EVENT_INIT, fn(Event $e) => $e->sender->set('varnish', VarnishVariable::class));
 

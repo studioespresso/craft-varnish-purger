@@ -10,6 +10,7 @@ use craft\events\DefineValueEvent;
 use craft\fields\BaseRelationField;
 use craft\web\View;
 use studioespresso\varnish\helpers\TagHelper;
+use studioespresso\varnish\Varnish;
 use yii\base\Component;
 use yii\base\Event;
 use yii\web\Response;
@@ -61,20 +62,43 @@ class PageTags extends Component
             $this->tagSearchQuery($e);
         });
 
-        Craft::$app->getResponse()->on(Response::EVENT_AFTER_PREPARE, function(Event $e) {
-            /** @var Response $response */
-            $response = $e->sender;
-            $tags = $this->getTags();
-            if ($response->getStatusCode() !== 200 || !$tags) {
-                return;
-            }
-            $response->getHeaders()->set(self::HEADER, implode(' ', $tags));
-            $response->getHeaders()->set(self::SITE_HEADER, (string)Craft::$app->getSites()->getCurrentSite()->id);
-            // Craft shortens this for expiring entries; otherwise it's the cacheDuration config setting.
-            if ($this->ttl) {
-                $response->getHeaders()->set('X-Cache-Ttl', (string)$this->ttl);
-            }
-        });
+        Craft::$app->getResponse()->on(Response::EVENT_AFTER_PREPARE, fn(Event $e) => $this->prepareResponse($e->sender));
+    }
+
+    /**
+     * Adds the tag headers to a page response that Varnish may cache.
+     */
+    public function prepareResponse(Response $response): void
+    {
+        $headers = $response->getHeaders();
+        // An `<esi:include>` can also come from a `{% cache %}` block, which skips craft.varnish.include()
+        if (is_string($response->content) && str_contains($response->content, '<esi:include')) {
+            $headers->set('Surrogate-Control', 'content="ESI/1.0"');
+        }
+
+        $tags = $this->getTags();
+        if ($response->getStatusCode() !== 200 || !$tags) {
+            return;
+        }
+        // Private pages (e.g. a `csrfInput()` without asyncCsrfInputs, or a started PHP session) must never be shared
+        $cacheControl = implode(',', [(string)$headers->get('Cache-Control'), ...preg_grep('/^Cache-Control:/i', headers_list())]);
+        if (preg_match('/no-store|private/i', $cacheControl)) {
+            return;
+        }
+        $header = implode(' ', $tags);
+        $max = Varnish::getInstance()->getSettings()->maxTagsHeaderLength;
+        if (strlen($header) > $max) {
+            $request = Craft::$app->getRequest();
+            $url = $request->getIsConsoleRequest() ? 'page' : $request->getUrl();
+            Craft::warning(sprintf('Not caching %s in Varnish: its %s header would be %d bytes (maxTagsHeaderLength: %d).', $url, self::HEADER, strlen($header), $max), __METHOD__);
+            return;
+        }
+        $headers->set(self::HEADER, $header);
+        $headers->set(self::SITE_HEADER, (string)Craft::$app->getSites()->getCurrentSite()->id);
+        // Craft shortens this for expiring entries; otherwise it's the cacheDuration config setting.
+        if ($this->ttl) {
+            $headers->set('X-Cache-Ttl', (string)$this->ttl);
+        }
     }
 
     /**

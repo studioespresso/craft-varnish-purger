@@ -3,6 +3,7 @@
 namespace studioespresso\varnish\tests\unit;
 
 use Codeception\Test\Unit;
+use Craft;
 use studioespresso\varnish\Varnish;
 
 class EsiTest extends Unit
@@ -22,7 +23,9 @@ class EsiTest extends Unit
         $this->assertStringStartsWith('/', $path, 'relative, so Varnish fetches it from its own backend');
         parse_str((string)parse_url($path, PHP_URL_QUERY), $query);
 
-        $this->assertSame(['t' => '_esiTest', 'v' => ['name' => 'Varnish']], $esi->decode($query['data']));
+        // The site goes along: with path-based sites the action URL may not resolve to the page's site
+        $siteId = Craft::$app->getSites()->getCurrentSite()->id;
+        $this->assertSame(['t' => '_esiTest', 'v' => ['name' => 'Varnish'], 's' => $siteId], $esi->decode($query['data']));
     }
 
     public function testTamperedFragmentDataIsRejected(): void

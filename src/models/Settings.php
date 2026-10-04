@@ -18,7 +18,7 @@ class Settings extends Model
 
     /**
      * Connect to a specific IP for a purge URL's hostname, like an /etc/hosts entry just for purging:
-     * `['jan.example.com' => '5.134.6.180']`. Use it when the hostname must be in the URL (shared hosting routes on
+     * `['www.example.com' => '203.0.113.10']`. Use it when the hostname must be in the URL (shared hosting routes on
      * it, and HTTPS needs it for the certificate) but DNS points elsewhere, e.g. to Cloudflare. Values may be
      * environment variables.
      *
@@ -36,6 +36,13 @@ class Settings extends Model
      * @var string[]
      */
     public array $hostnames = [];
+
+    /**
+     * Longest `X-Cache-Tags` header (in bytes) a page may send. Pages with more tags aren't tagged, so Varnish doesn't
+     * cache them (a warning is logged): a header over Varnish's `http_resp_hdr_len` (8 KB by default), or over the
+     * response header buffer of a proxy in between (nginx: 4 or 8 KB), would fail the whole response.
+     */
+    public int $maxTagsHeaderLength = 4000;
 
     /**
      * Rows for the CP table: `[['host' => 'varnish', 'port' => 80], …]`.
@@ -103,7 +110,7 @@ class Settings extends Model
     {
         $parts = parse_url($url);
         $host = $parts['host'] ?? null;
-        $ip = $host !== null ? App::parseEnv($this->resolve[$host] ?? '') : '';
+        $ip = $host !== null ? trim((string)App::parseEnv((string)($this->resolve[$host] ?? ''))) : '';
         if (!$ip) {
             return [];
         }
@@ -112,20 +119,29 @@ class Settings extends Model
     }
 
     /**
-     * @return string[] [[hostnames]] with environment variables resolved, lowercased, without ports
+     * @return string[] [[hostnames]] with environment variables resolved (which may hold several, separated by commas
+     * or spaces), lowercased, without ports or a trailing dot. Anything else the VCL would refuse is dropped.
      */
     public function getResolvedHostnames(): array
     {
-        $hosts = array_map(fn(string $host) => strtolower(preg_replace('/:\d+$/', '', trim(App::parseEnv($host)))), $this->hostnames);
-        return array_values(array_unique(array_filter($hosts)));
+        $hosts = [];
+        foreach ($this->hostnames as $value) {
+            foreach (preg_split('/[\s,]+/', (string)App::parseEnv((string)$value), -1, PREG_SPLIT_NO_EMPTY) as $host) {
+                $host = rtrim(strtolower((string)preg_replace('/:\d+$/', '', $host)), '.');
+                if (preg_match('/^[a-z0-9.-]+$/', $host)) {
+                    $hosts[] = $host;
+                }
+            }
+        }
+        return array_values(array_unique($hosts));
     }
 
     /**
-     * @return string[] [[purgeUrls]] with environment variables resolved
+     * @return string[] [[purgeUrls]] with environment variables resolved; empty ones (an unset variable) are dropped
      */
     public function getResolvedPurgeUrls(): array
     {
-        return array_values(array_filter(array_map(fn(string $url) => App::parseEnv($url), $this->purgeUrls)));
+        return array_values(array_filter(array_map(fn($url) => trim((string)App::parseEnv((string)$url)), $this->purgeUrls)));
     }
 
     protected function defineRules(): array
