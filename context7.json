@@ -1,4 +1,18 @@
 {
+  "$schema": "https://context7.com/schema/context7.json",
   "url": "https://context7.com/studioespresso/craft-varnish-purger",
-  "public_key": "pk_apXrKaPOYGd884uGpHIGV"
+  "public_key": "pk_apXrKaPOYGd884uGpHIGV",
+  "projectTitle": "Varnish Purger for Craft CMS",
+  "description": "Caches Craft CMS 5 front-end pages in Varnish and purges exactly the pages that changed, using Craft's own element cache tags (the ones behind {% cache %}) and core Varnish bans. Supports multiple Varnish servers, multi-site, shared Varnish servers and ESI fragments.",
+  "excludeFolders": ["tests", ".github"],
+  "rules": [
+    "Read AGENTS.md in the repository before setting the plugin up or changing its VCL: it covers how tagging and purging work, the edge cases, adapting the VCL to a site, and hosting pitfalls (host-provided VCLs, purge endpoints that answer '200 Purged', proxies, Cloudflare, Varnish 6.0).",
+    "Install with `composer require studioespresso/craft-varnish-purger` and `php craft plugin/install varnish`. Plugin handle `varnish`, namespace `studioespresso\\varnish`. Requires Craft CMS 5.2+, PHP 8.3+ and Varnish 6.0+.",
+    "The plugin only works with a VCL tuned for the site. Start from example.vcl (Varnish 6.6+) or example-varnish-6.0.vcl (Varnish 6.0), set the backend and `acl purge`, and decide per site what must never be cached and which cookies matter. Never drop the parts that strip forwarded headers (cache poisoning), force `Cache-Control: no-cache` towards browsers, or validate BAN headers.",
+    "Configure the Varnish servers in Settings → Plugins → Varnish, or per environment in config/varnish.php (`purgeUrls`, plus `resolve` and `hostnames` for hosting setups). Use Varnish's internal address, not the public site URL. Run `php craft varnish/check` after deploying: every server must answer `200 Ban added`.",
+    "Don't add your own cache tags or purge logic for element changes: tagging and invalidation come from Craft (Elements::startCollectingCacheInfo, EVENT_INVALIDATE_CACHES). For data that isn't an element, call `Craft::$app->getElements()->invalidateAllCaches()`, or run `php craft varnish/purge`.",
+    "To cache pages with forms, enable `->asyncCsrfInputs(true)` in config/general.php. Pages that print a CSRF token directly are private (no-store) and are never cached.",
+    "For parts of a cached page that must be fresh on every request, use `{{ craft.varnish.include('_partials/stock', {productId: product.id}) }}` (ESI). Pass scalar values only; they're signed, not encrypted. ESI fragments can't set cookies.",
+    "To debug, request a page twice while logged out and check the `X-Cache` (HIT/MISS), `X-Cache-Tags` and `X-Cache-Site` response headers, and list bans with `varnishadm ban.list`."
+  ]
 }
