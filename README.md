@@ -8,6 +8,16 @@ Every page Varnish caches is labelled with what it shows: the entries, assets an
 
 The labels are Craft's own element cache tags, the ones behind `{% cache %}`, so the plugin follows Craft's rules for what a save affects. It uses Varnish's built-in bans, so no Varnish modules are needed.
 
+> [!IMPORTANT]
+> **This plugin only works together with a VCL tuned for it, and that VCL depends on the site and its hosting.** The plugin tags pages and sends BAN requests; Varnish has to cache those tagged pages and turn the BANs into bans. The example VCLs are a starting point, not a drop-in config. Expect to adapt them to things like:
+>
+> - **Your Varnish version:** `std.ban()` needs Varnish 6.6+; on 6.0, use `example-varnish-6.0.vcl`.
+> - **How requests reach Varnish:** behind a proxy, load balancer or CDN, the client IP that `acl purge` should check may arrive in a header set by that proxy instead of `client.ip`, and the Craft server may reach Varnish by yet another route.
+> - **Managed hosting:** hosts often run their own VCL template, a bypass switch, or a separate purge endpoint that handles BAN/PURGE itself and never reaches your VCL. Find out how to load your own VCL and where it receives requests.
+> - **The site itself:** backend address, what must never be cached (login areas, carts, per-visitor content), cookies, and the hostnames it's served under.
+>
+> Verify the result on the actual setup: `php craft varnish/check` must answer `Ban added`, pages must show `X-Cache: HIT` on a repeat request, and saving an entry must turn its page into a `MISS`. Test before pointing live traffic at Varnish.
+
 ## Requirements
 
 - Craft CMS 5, on PHP 8.3 or newer

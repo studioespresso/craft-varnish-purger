@@ -81,9 +81,29 @@ sub vcl_recv {
     return (pass);
   }
 
+  # Cookies: by default all are stripped, so every visitor shares the cached page. To pass cookies the backend
+  # renders differently for (e.g. a cookie-consent choice), use this cookie keep-list instead of the unset below,
+  # adjust the "__consent" pattern, AND enable the vcl_hash block further down (one cached copy per value).
+  # Only for cookies with a few possible values: a unique value per visitor makes every request a miss.
+  # set req.http.Cookie = ";" + req.http.Cookie;
+  # set req.http.Cookie = regsuball(req.http.Cookie, "; +", ";");
+  # set req.http.Cookie = regsuball(req.http.Cookie, ";(__consent[^=]*)=", "; \1=");
+  # set req.http.Cookie = regsuball(req.http.Cookie, ";[^ ][^;]*", "");
+  # set req.http.Cookie = regsuball(req.http.Cookie, "^[; ]+|[; ]+$", "");
+  # if (req.http.Cookie == "") {
+  #   unset req.http.Cookie;
+  # }
   unset req.http.Cookie;
   return (hash);
 }
+
+# Enable together with the cookie keep-list in vcl_recv: one cached copy per value of the kept cookies.
+# sub vcl_hash {
+#   if (req.http.Cookie) {
+#     hash_data(req.http.Cookie);
+#   }
+#   # no return: Varnish then also hashes URL + host as usual
+# }
 
 sub vcl_backend_response {
   # Responses that contain <esi:include> tags ask for processing; each include is fetched as its own request
