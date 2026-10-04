@@ -150,6 +150,13 @@ sub vcl_deliver {
   if (obj.hits > 0) {
     set resp.http.X-Cache = "HIT";
   }
+  # Browsers must ask again every time: a purge only clears Varnish, and a browser holding the page (e.g. from a
+  # mod_expires max-age on HTML) would keep showing it, also after logging in. Set here, not in
+  # vcl_backend_response: the built-in VCL would then refuse to cache the page.
+  if (resp.http.X-Cache-Tags) {
+    set resp.http.Cache-Control = "no-cache";
+    unset resp.http.Expires;
+  }
   # Internal: only used to limit bans by hostname
   unset resp.http.X-Cache-Host;
   # Keep the tags visible for debugging; uncomment to hide them in production.

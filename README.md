@@ -39,7 +39,7 @@ Start from [`example.vcl`](example.vcl) on Varnish 6.6 and newer, or from [`exam
 
 - only caches pages the plugin has tagged, and passes everything else (the CP, action requests, previews and other token requests, logged-in users, non-GET requests) through to Craft
 - never caches private responses (`Cache-Control: no-store` or `private`)
-- strips cookies from cached pages
+- strips cookies from cached pages, and tells browsers not to keep them (`Cache-Control: no-cache`), so a purge also reaches visitors who saw the page before, and editors who log in see their own version
 - drops request headers Craft would use to change the URL, host or site (`X-Forwarded-Host`, `X-Rewrite-Url`, `X-Craft-Site` and the like), so a crafted request can't store a different page under a normal URL. `X-Forwarded-Proto` is kept and becomes part of the cache key.
 - accepts purge requests (`BAN`) only from the IP addresses in `acl purge`, and only when they're sent directly rather than relayed through a proxy or load balancer
 - adds an `X-Cache: HIT/MISS` header, handy while testing

@@ -203,7 +203,11 @@ denial of service). Which IP to check depends on how requests reach Varnish:
   Cloudflare and are refused. Use `resolve` to send them to the origin directly. Cloudflare doesn't cache HTML by
   default (`cf-cache-status: DYNAMIC`); keep it that way, the plugin only purges Varnish.
 - A long `Cache-Control: max-age` on HTML (often from `.htaccess`/`mod_expires`) makes *browsers* keep stale pages no
-  matter how well Varnish is purged. HTML should get `no-cache` or a short max-age.
+  matter how well Varnish is purged, and keeps showing a logged-in editor the anonymous copy (no debug toolbar, no
+  edit links) because the request never leaves the browser. The example VCLs override it to `Cache-Control: no-cache`
+  (and drop `Expires`) on cached pages in `vcl_deliver`. Not in `vcl_backend_response`: Varnish's built-in VCL, which
+  runs after it, marks any `no-cache` response uncacheable. Keep that override in adapted VCLs, and fix the
+  `.htaccess` too (`ExpiresByType text/html "access plus 0 seconds"`) for pages Varnish passes.
 
 ## Forms, CSRF and ESI
 
