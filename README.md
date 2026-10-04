@@ -224,3 +224,5 @@ ddev exec -d /var/www/html/code/craft-varnish-purger composer test
 ```
 
 CI runs ECS, PHPStan and the tests on every push and pull request (`.github/workflows/ci.yml`).
+
+AI agents working with this plugin (installing it, writing a VCL, debugging a hosting setup) should also read [`AGENTS.md`](AGENTS.md): it has the background, edge cases and hosting pitfalls in full.
