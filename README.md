@@ -133,11 +133,15 @@ Render part of a cached page in its own request, so it can change on every page 
 
 ## Purging everything
 
-Use **Utilities → Caches → Varnish cache**, or:
+Use **Utilities → Caches → Varnish cache**, or from the command line, which shows each server's answer:
 
 ```bash
-php craft clear-caches/varnish
+php craft varnish/purge                       # every page
+php craft varnish/purge --tags=12,e:s:3       # only pages with these tags (element 12, entries of section 3)
+php craft varnish/purge --site=french         # only pages of one site (handle or ID)
 ```
+
+`php craft clear-caches/varnish` purges everything too. All of these respect the `hostnames` setting.
 
 ## How pages are tagged
 
