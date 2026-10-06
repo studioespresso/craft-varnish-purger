@@ -1,7 +1,7 @@
 {
   "name": "studioespresso/craft-varnish-purger",
   "description": "Tag-based Varnish purging for Craft CMS: tracks the elements and queries used on each page and purges them on save.",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "type": "craft-plugin",
   "license": "MIT",
   "keywords": [
