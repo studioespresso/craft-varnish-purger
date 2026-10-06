@@ -6,9 +6,11 @@ use Craft;
 use craft\base\Model;
 use craft\base\Plugin;
 use craft\events\InvalidateElementCachesEvent;
+use craft\events\MoveElementEvent;
 use craft\events\RegisterCacheOptionsEvent;
 use craft\queue\jobs\UpdateSearchIndex;
 use craft\services\Elements;
+use craft\services\Structures;
 use craft\utilities\ClearCaches;
 use craft\web\twig\variables\CraftVariable;
 use studioespresso\varnish\helpers\TagHelper;
@@ -59,6 +61,9 @@ class Varnish extends Plugin
 
         // Craft fires this on save, delete, restore and move, including Matrix owners.
         Event::on(Elements::class, Elements::EVENT_INVALIDATE_CACHES, fn(InvalidateElementCachesEvent $e) => $this->purger->queue($e));
+        foreach ([Structures::EVENT_BEFORE_INSERT_ELEMENT, Structures::EVENT_BEFORE_MOVE_ELEMENT] as $event) {
+            Event::on(Structures::class, $event, fn(MoveElementEvent $e) => $this->purger->startStructureChange($e->element));
+        }
         Event::on(Queue::class, Queue::EVENT_AFTER_EXEC, function(ExecEvent $e) {
             if ($e->job instanceof UpdateSearchIndex) {
                 $this->purger->queueSearchIndexed($e->job);

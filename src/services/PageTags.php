@@ -3,11 +3,15 @@
 namespace studioespresso\varnish\services;
 
 use Craft;
+use craft\base\ElementInterface;
+use craft\base\NestedElementInterface;
+use craft\elements\db\AssetQuery;
 use craft\elements\db\CategoryQuery;
 use craft\elements\db\ElementQuery;
 use craft\elements\db\EntryQuery;
 use craft\events\DefineValueEvent;
 use craft\fields\BaseRelationField;
+use craft\helpers\ArrayHelper;
 use craft\web\View;
 use studioespresso\varnish\helpers\TagHelper;
 use studioespresso\varnish\Varnish;
@@ -59,6 +63,8 @@ class PageTags extends Component
 
         Event::on(ElementQuery::class, ElementQuery::EVENT_DEFINE_CACHE_TAGS, function(DefineValueEvent $e) {
             $this->scopeRelationQuery($e);
+            $this->scopeStructureQuery($e);
+            $this->scopeNeoOwnerQuery($e);
             $this->tagSearchQuery($e);
         });
 
@@ -136,12 +142,23 @@ class PageTags extends Component
     private function scopeRelationQuery(DefineValueEvent $e): void
     {
         $query = $e->sender;
-        if ($e->value || !($query instanceof EntryQuery || $query instanceof CategoryQuery) || !$query->eagerLoadSourceElement) {
+        if ($e->value || !($query instanceof EntryQuery || $query instanceof CategoryQuery || $query instanceof AssetQuery) || !$query->eagerLoadSourceElement) {
             return;
         }
         $handle = substr((string)strrchr(':' . $query->eagerLoadHandle, ':'), 1);
         $field = $query->eagerLoadSourceElement->getFieldLayout()?->getFieldByHandle($handle);
         if (!$field instanceof BaseRelationField) {
+            return;
+        }
+        // Assets fields usually allow every volume, and sites tend to have one main volume, so a volume scope would
+        // still purge on every upload. Tag the element that owns the field instead: editing its relations saves it,
+        // and every asset the page shows has its own tag.
+        // ponytail: misses a related asset the page doesn't show changing state (a disabled one enabled, or a count
+        // after deleting one) until the TTL; scope to the field's volumes if that matters.
+        if ($query instanceof AssetQuery) {
+            if ($query->eagerLoadSourceElement->id) {
+                $e->value = ["element::{$query->eagerLoadSourceElement->id}"];
+            }
             return;
         }
         // Entries fields list several `sources`; Categories fields have a single `source`.
@@ -163,6 +180,68 @@ class PageTags extends Component
                 return;
             }
             $tags[] = $tag;
+        }
+        $e->value = $tags;
+    }
+
+    /**
+     * Structure queries (`entry.ancestors`, `.children`, `.siblings`, Neo's nested blocks) filter on a structure, not a
+     * section, so Craft gives them the catch-all `*` tag too. Scope them to what owns the structure, which is what
+     * a save or move in it invalidates: the entry section, the category group, or (Neo) the block field and owner.
+     */
+    private function scopeStructureQuery(DefineValueEvent $e): void
+    {
+        $query = $e->sender;
+        if ($e->value || !$query instanceof ElementQuery) {
+            return;
+        }
+        $relative = $query->descendantOf ?? $query->ancestorOf ?? $query->siblingOf ?? $query->prevSiblingOf
+            ?? $query->nextSiblingOf ?? $query->positionedBefore ?? $query->positionedAfter;
+        if ($relative === null) {
+            return;
+        }
+        // Neo keeps one structure per field and owner; saving one of its blocks invalidates `field-owner:{field}-{owner}`
+        // (matched by name: Neo isn't a dependency)
+        if ($relative instanceof NestedElementInterface && is_a($relative, 'benf\neo\elements\Block')) {
+            $e->value = [sprintf('field-owner:%s-%s', $relative->getField()?->id, $relative->getPrimaryOwnerId())];
+            return;
+        }
+        $structureId = $query->structureId ?: ($relative instanceof ElementInterface ? $relative->structureId : null);
+        if (!is_numeric($structureId)) {
+            return;
+        }
+        $tag = match (true) {
+            $query instanceof EntryQuery =>
+                ($section = ArrayHelper::firstWhere(Craft::$app->getEntries()->getAllSections(), 'structureId', $structureId)) ? "section:$section->id" : null,
+            $query instanceof CategoryQuery =>
+                ($group = ArrayHelper::firstWhere(Craft::$app->getCategories()->getAllGroups(), 'structureId', $structureId)) ? "group:$group->id" : null,
+            default => null,
+        };
+        if ($tag) {
+            $e->value = [$tag];
+        }
+    }
+
+    /**
+     * Neo's block query only scopes to an owner by `primaryOwnerId`. A Neo field value (`entry.contentBuilder`)
+     * filters on `ownerId`, so it falls back to `field:{id}`, which a block save in that field on *any* entry
+     * invalidates. Use the `field-owner` tag Neo invalidates for that owner's blocks instead.
+     */
+    private function scopeNeoOwnerQuery(DefineValueEvent $e): void
+    {
+        $query = $e->sender;
+        // (matched by name: Neo isn't a dependency)
+        if (!is_a($query, 'benf\neo\elements\db\BlockQuery') || $query->primaryOwnerId || !$query->ownerId || !$query->fieldId) {
+            return;
+        }
+        if (array_diff((array)$e->value, array_map(fn($id) => "field:$id", (array)$query->fieldId))) {
+            return;
+        }
+        $tags = [];
+        foreach ((array)$query->fieldId as $fieldId) {
+            foreach ((array)$query->ownerId as $ownerId) {
+                $tags[] = "field-owner:$fieldId-$ownerId";
+            }
         }
         $e->value = $tags;
     }

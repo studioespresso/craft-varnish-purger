@@ -6,7 +6,9 @@ use Codeception\Test\Unit;
 use Craft;
 use craft\elements\Category;
 use craft\elements\Entry;
+use craft\events\InvalidateElementCachesEvent;
 use craft\fieldlayoutelements\CustomField;
+use craft\fields\Assets;
 use craft\fields\Categories;
 use craft\fields\Entries;
 use craft\fields\PlainText;
@@ -70,7 +72,10 @@ class TaggingTest extends Unit
         $summary = new PlainText(['name' => 'Summary', 'handle' => 'summary', 'translationMethod' => 'site']);
         Craft::$app->getFields()->saveField($summary);
 
-        $this->news = $this->createSection('news', $related, $labelsField, $summary);
+        $images = new Assets(['name' => 'Images', 'handle' => 'images', 'sources' => '*']);
+        Craft::$app->getFields()->saveField($images);
+
+        $this->news = $this->createSection('news', [$related, $labelsField, $summary, $images]);
 
         $this->label = new Category(['groupId' => $this->labels->id, 'title' => 'Label']);
         $this->assertTrue(Craft::$app->getElements()->saveElement($this->label));
@@ -109,6 +114,26 @@ class TaggingTest extends Unit
         $this->assertContains((string)$this->label->id, $tags);
         $this->assertContains("c:g:{$this->labels->id}", $tags);
         $this->assertNotContains('c:any', $tags);
+    }
+
+    public function testAssetsFieldIsScopedToItsOwner(): void
+    {
+        $tags = $this->render('_images', ['entry' => $this->article]);
+
+        // Editing the field saves the article; any asset save would purge it with Craft's catch-all `Asset::*`.
+        $this->assertContains((string)$this->article->id, $tags);
+        $this->assertNotContains('a:any', $tags);
+    }
+
+    public function testStructureQueriesAreScopedToTheirSection(): void
+    {
+        $pages = $this->createSection('pages', [], Section::TYPE_STRUCTURE);
+        $parent = $this->createEntry($pages, 'Parent');
+        $child = $this->createEntry($pages, 'Child', [], $parent);
+
+        $this->assertContains("e:s:{$pages->id}", $this->render('_ancestors', ['entry' => $child]));
+        $this->assertNotContains('e:any', $this->render('_ancestors', ['entry' => $child]));
+        $this->assertNotContains('e:any', $this->render('_children', ['entry' => $parent]));
     }
 
     public function testSearchPageIsTaggedForSearchIndexUpdates(): void
@@ -257,6 +282,21 @@ class TaggingTest extends Unit
         $this->assertSame([Purger::ALL_SITES], array_keys($this->plugin->purger->getPending()));
     }
 
+    public function testNeoStructureRebuildSkipsTypeWideBan(): void
+    {
+        require_once dirname(__DIR__) . '/_support/stubs/NeoBlock.php';
+        $typeWide = new InvalidateElementCachesEvent(['tags' => ['element::benf\\neo\\elements\\Block']]);
+
+        // Neo rebuilds an owner's block structure on every save; Craft then invalidates the whole block type
+        $this->plugin->purger->startStructureChange(new \benf\neo\elements\Block());
+        $this->plugin->purger->queue($typeWide);
+        $this->assertSame([], $this->plugin->purger->getPending());
+
+        // Any other type-wide invalidation (e.g. a block type change) still bans
+        $this->plugin->purger->queue($typeWide);
+        $this->assertNotSame([], $this->plugin->purger->getPending());
+    }
+
     public function testDraftSavesAreIgnored(): void
     {
         Craft::$app->getDrafts()->createDraft($this->topic);
@@ -281,7 +321,7 @@ class TaggingTest extends Unit
         return $this->plugin->pageTags->getTags();
     }
 
-    private function createSection(string $handle, Entries|Categories|PlainText ...$fields): Section
+    private function createSection(string $handle, array $fields = [], string $sectionType = Section::TYPE_CHANNEL): Section
     {
         $type = new EntryType(['name' => ucfirst($handle), 'handle' => $handle]);
         $layout = new FieldLayout(['type' => Entry::class]);
@@ -296,7 +336,7 @@ class TaggingTest extends Unit
         $section = new Section([
             'name' => ucfirst($handle),
             'handle' => $handle,
-            'type' => Section::TYPE_CHANNEL,
+            'type' => $sectionType,
             'entryTypes' => [$type],
             'siteSettings' => [
                 new Section_SiteSettings([
@@ -309,7 +349,7 @@ class TaggingTest extends Unit
         return $section;
     }
 
-    private function createEntry(Section $section, string $title, array $fields = []): Entry
+    private function createEntry(Section $section, string $title, array $fields = [], ?Entry $parent = null): Entry
     {
         $entry = new Entry([
             'sectionId' => $section->id,
@@ -317,6 +357,9 @@ class TaggingTest extends Unit
             'title' => $title,
         ]);
         $entry->setFieldValues($fields);
+        if ($parent) {
+            $entry->setParentId($parent->id);
+        }
         $this->assertTrue(Craft::$app->getElements()->saveElement($entry), implode(', ', $entry->getFirstErrors()));
         return $entry;
     }

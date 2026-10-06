@@ -73,6 +73,21 @@ other plugins via `ElementQuery::EVENT_DEFINE_CACHE_TAGS`) is squeezed into `[A-
 - **Relation fields.** Craft gives relation field queries the catch-all `*` tag, which would purge every page using a
   relation field on any save. The plugin narrows Entries fields to their sections and Categories fields to their group
   (`PageTags::scopeRelationQuery()`). Only plain `section:`/`group:` sources are narrowed; other sources keep `*`.
+  Assets fields are tagged with the element that owns the field (`element::{id}`) instead: they usually allow every
+  volume, so a volume scope would still purge on every upload. Editing the relation saves the owner, and every shown
+  asset has its own tag; a related asset the page doesn't show changing state (disabled → enabled, or a count after
+  deleting one) only shows after the TTL.
+- **Structures.** Structure queries (`entry.ancestors`, `.children`, `.siblings`) get `*` too; the plugin scopes them
+  to the section or category group that owns the structure (`PageTags::scopeStructureQuery()`). `entry.parent` is
+  looked up by ID and needs nothing. Craft also invalidates the *whole element type* after an element is inserted or
+  moved in a structure (craftcms/cms#14846), so reordering entries in a structure section still purges every page
+  with an entry query.
+- **Neo.** Neo keeps one block structure per field and owner. Its nested block queries (`block.children`) are scoped to
+  `field-owner:{field}-{owner}`, and so is a Neo field value (`entry.contentBuilder`), which Neo itself only scopes to
+  `field:{id}` (it checks `primaryOwnerId`, the field value sets `ownerId`) (`PageTags::scopeNeoOwnerQuery()`). Neo
+  rebuilds the structure on every owner save, after which Craft invalidates the whole block type; the plugin skips
+  that one type-wide ban (`Purger::startStructureChange()`), since the owner save already bans the owner and its
+  `field-owner` tag. Neo is matched by class name, it isn't a dependency.
 - **Multi-site.** A save that only changes translatable content (translatable fields, a translatable title) is banned
   on that site only (`X-Cache-Site-Ban`). Everything else bans on all sites, because Craft silently propagates shared
   values to the other sites: untranslatable fields (relation fields are shared by default), post date, global status,

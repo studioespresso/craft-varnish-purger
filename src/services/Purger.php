@@ -27,9 +27,15 @@ class Purger extends Component
 
     /** @var array<int|string, array<string, true>> header tags to ban, keyed by site ID or [[ALL_SITES]] */
     private array $pending = [];
+    /** Element class whose structure is being changed, see [[startStructureChange()]] */
+    private ?string $structureChange = null;
 
     public function queue(InvalidateElementCachesEvent $e): void
     {
+        if (!$e->element && $this->structureChange && $e->tags === ["element::$this->structureChange"]) {
+            $this->structureChange = null;
+            return;
+        }
         // Live pages never depend on drafts/revisions; skipping them avoids a ban on every autosave.
         if ($e->element && self::isDraftOrRevision($e->element)) {
             return;
@@ -38,6 +44,18 @@ class Purger extends Component
         foreach ($e->tags as $tag) {
             $this->pending[$scope][TagHelper::headerTag($tag)] = true;
         }
+    }
+
+    /**
+     * Craft invalidates a whole element type after an element is inserted or moved in a structure
+     * (craftcms/cms#14846). Neo keeps one block structure per field and owner and rebuilds it on every owner save,
+     * so every page with Neo content would be purged by any save. That save already bans the owner and its
+     * `field-owner` tag, so the type-wide ban that follows a Neo structure change is skipped.
+     */
+    public function startStructureChange(ElementInterface $element): void
+    {
+        // (matched by name: Neo isn't a dependency)
+        $this->structureChange = is_a($element, 'benf\neo\elements\Block') ? $element::class : null;
     }
 
     /**
