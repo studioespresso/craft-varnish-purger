@@ -4,7 +4,7 @@
 
 Cache your Craft site in Varnish, and purge exactly the pages that changed when content is saved.
 
-Every page Varnish caches is labelled with what it shows: the entries, assets and categories it outputs, the sections it lists, the Matrix fields it renders. When an editor saves something, the plugin tells Varnish to drop every page with a matching label. Edit an event and only the event page and the listings that show it are purged; the rest of the site stays cached.
+Every page Varnish caches is labelled with what it shows: the entries, assets and users it outputs, the sections it lists, the Matrix fields it renders. When an editor saves something, the plugin tells Varnish to drop every page with a matching label. Edit an event and only the event page and the listings that show it are purged; the rest of the site stays cached.
 
 The labels are Craft's own element cache tags, the ones behind `{% cache %}`, so the plugin follows Craft's rules for what a save affects. It uses Varnish's built-in bans, so no Varnish modules are needed.
 
@@ -20,15 +20,15 @@ The labels are Craft's own element cache tags, the ones behind `{% cache %}`, so
 
 ## Requirements
 
-- Craft CMS 5.2 or newer, on PHP 8.3 or newer
+- Craft CMS 6 (alpha) on PHP 8.5. For Craft 5, use version 1.x.
 - Varnish 6.0 or newer in front of your site (tested with 6.0, 6.6 and 7.7)
 - Varnish must be reachable from the Craft server, so it can receive purge requests
 
 ## Installation
 
 ```bash
-composer require studioespresso/craft-varnish-purger
-php craft plugin/install varnish
+composer require studioespresso/craft-varnish-purger:^6.0@beta
+php craft plugin:install varnish
 ```
 
 Then set up Varnish and tell the plugin where it lives.
@@ -65,46 +65,33 @@ Go to **Settings → Plugins → Varnish** and add each Varnish server: its host
 - **The port** is usually 6081 for Varnish from Linux packages, and 80 in Docker. Leave it empty for 80.
 - **Hosts can be environment variables**, like `$VARNISH_HOST`.
 
-Or configure the servers in `config/varnish.php`. This overrides the CP setting and locks the table. Use Craft's per-environment format to give each environment (`CRAFT_ENVIRONMENT`) its own servers:
+Or configure the servers in `config/craft/varnish.php` (publish the plugin's copy with `php artisan vendor:publish --tag=varnish`). Values set there override the CP settings, and setting `purgeUrls` locks the table. It's a plain Laravel config file, so use `env()` for anything that differs per environment:
 
 ```php
 <?php
 
-use craft\helpers\App;
-
 return [
-    '*' => [],
-    'dev' => [
-        'purgeUrls' => ['http://varnish'],
-    ],
-    'staging' => [
-        'purgeUrls' => [App::env('VARNISH_PURGE_URL') ?: 'http://127.0.0.1:6081'],
-    ],
-    'production' => [
-        'purgeUrls' => ['http://10.0.0.11:6081', 'http://10.0.0.12:6081'],
-    ],
+    'purgeUrls' => array_filter([env('VARNISH_URL')]), // e.g. VARNISH_URL=http://10.0.0.11:6081
 ];
 ```
 
-- Set `purgeUrls` per environment, **not in `'*'` as well**: Craft merges `'*'` into the environment and appends lists, so production would ban on both sets of servers.
-- Environment keys match on substrings: `'prod'` also matches `production`.
-- Leave `purgeUrls` out for an environment to manage its servers in the CP instead.
+Craft 5's per-environment format (`'*'`, `'dev'`, `'production'` keys) is no longer supported; move those values to `.env`.
 
 Two more options, for hosting setups (config file only):
 
 ```php
-'production' => [
+return [
     'purgeUrls' => ['https://www.example.com'],
     // Connect to this IP for the purge URL's hostname, like an /etc/hosts entry just for purging. Use it when DNS
     // points elsewhere (e.g. Cloudflare) but the hostname must stay in the URL (shared hosting routes on it, HTTPS needs it).
-    'resolve' => ['www.example.com' => '203.0.113.10'],
+    'resolve' => ['www.example.com' => env('VARNISH_ORIGIN_IP')],
     // Only ban pages cached under these hostnames: needed when other sites share the same Varnish. List every
     // hostname this install's pages are cached under (www-variants, aliases): pages under a missing one are never purged.
     'hostnames' => ['example.com', 'www.example.com'],
-],
+];
 ```
 
-If no servers are configured, pages are still tagged and cached but nothing is ever purged (logged at info level, so visible with `devMode` on).
+If no servers are configured, pages are still tagged and cached but nothing is ever purged (logged at info level).
 
 Pages with a lot of tags (long listings showing hundreds of elements) are not tagged, and so not cached, once the `X-Cache-Tags` header would exceed `maxTagsHeaderLength` (4000 bytes by default). A warning is logged. A header over Varnish's `http_resp_hdr_len` (8 KB by default), or over the header buffer of a proxy in between, would fail the whole response. Raise the setting together with those limits if needed.
 
@@ -132,7 +119,7 @@ curl -sI https://example.com/news | grep -i x-cache
 # X-Cache: HIT
 ```
 
-Save one of the entries on that page in the CP, and the next request is a `MISS` again. Every ban is logged per server with Varnish's answer: failures always (`Varnish ban failed (http://… → 403 Forbidden: BAN from 10.0.0.5 …)`), successes with `devMode` on (`Varnish banned: … (http://… → 200 Ban added)`).
+Save one of the entries on that page in the CP, and the next request is a `MISS` again. Every ban is logged per server with Varnish's answer: failures always (`Varnish ban failed (http://… → 403 Forbidden: BAN from 10.0.0.5 …)`), successes at info level (`Varnish banned: … (http://… → 200 Ban added)`).
 
 ## ESI (Edge Side Includes)
 
@@ -143,7 +130,7 @@ Render part of a cached page in its own request, so it can change on every page 
 ```
 
 - Behind Varnish this outputs an `<esi:include>` tag, which Varnish replaces with the fragment. Anywhere else (no Varnish, `novarnish.` hosts, console) the template is rendered inline, so templates work either way.
-- The fragment is rendered by a plugin action (`/actions/varnish/esi/render`). Its parameters are signed with Craft's security key, so it can't be used to render arbitrary templates. They're not encrypted, though: the template name and variables are readable in the page source, so don't pass anything secret. It's never cached.
+- The fragment is rendered by a plugin action (`/actions/varnish/esi/render`). Its parameters are signed with the app key (`APP_KEY`), so it can't be used to render arbitrary templates. They're not encrypted, though: the template name and variables are readable in the page source, so don't pass anything secret. It's never cached.
 - Pass simple values only (IDs, strings): the fragment is rendered in a separate request, on the same site as the page.
 - If a fragment fails to render, Varnish gets an empty fragment and the error is logged (with `devMode` on, you see the error instead).
 - An include inside a `{% cache %}` block works too: the plugin asks Varnish to process any response that contains an `<esi:include>` tag.
@@ -187,12 +174,12 @@ Some details:
 
 - **Matrix:** saving a nested entry also purges its owner's pages.
 - **Drafts and revisions** never purge anything, so autosaves don't empty the cache.
-- **Relation fields:** Craft tags these queries `e:any` or `c:any`, so any entry or category save would purge every page using such a field. The plugin narrows Entries fields to the sections they allow, Categories fields to their category group, and Assets fields to the element that owns the field.
-- **Structures and Neo:** structure queries (`entry.ancestors`, `.children`) are narrowed to their section or category group, and Neo content to the entry it belongs to, so saving one entry no longer purges every page with a content builder.
+- **Relation fields:** Craft tags these queries `e:any`, so any entry save would purge every page using such a field. The plugin narrows Entries fields to the sections they allow, and Assets fields to the element that owns the field. (Legacy categories and tags from the Yii2 adapter aren't narrowed.)
+- **Structures:** structure queries (`entry.ancestors`, `.children`) are narrowed to their section.
 - **Search results:** pages that use `.search()` are also tagged `e:search`. CP saves update Craft's search index in a queue job after the save (and after its purge), so the plugin purges search pages again once that job has run. Otherwise a search re-cached in between would miss the new content.
-- **Expiry dates:** pages are cached until the nearest expiry date of an entry they show, or for Craft's `cacheDuration` (1 day by default).
+- **Expiry dates:** pages are cached until the nearest expiry date of an entry they show, or for the VCL's default TTL (1 day in the examples).
 - **Multi-site:** each page also carries its site ID (`X-Cache-Site`). When a save only changes translatable content (translatable fields, a translatable title), only that site's pages are purged. Anything else purges the affected pages on every site: shared values like untranslatable fields or the post date (Craft copies those to the other sites), new entries, and changes to a version's slug, URI or enabled status (other sites link to it, e.g. from a language switcher). One exception: a page that shows another site's content (`craft.entries.site('*')`) isn't purged by a change limited to that other site.
-- **What gets tagged:** only front-end `GET` requests that return `200` and aren't private. Error pages, redirects, CP requests, previews, token requests and responses sent with `Cache-Control: no-store` or `private` (for example a page that outputs `csrfInput()` without `asyncCsrfInputs`) are never tagged, so Varnish doesn't cache them.
+- **What gets tagged:** only front-end `GET` requests that return `200` and aren't private. Error pages, redirects, CP requests, previews, token requests and responses sent with `Cache-Control: no-store` or an explicit `private` (for example a page that outputs `csrfInput()` without `asyncCsrfInputs`) are never tagged, so Varnish doesn't cache them. Tagged pages are sent with `Cache-Control: public`: Laravel otherwise marks every response `private`, which Varnish refuses to cache. The VCL tells browsers `no-cache` for them.
 
 ## Purge requests
 
@@ -212,28 +199,20 @@ Varnish then drops every cached page carrying one of those tags, whatever its UR
 ## Known limitations
 
 - **Future post dates:** an entry scheduled to go live doesn't trigger a purge when it does. Listings pick it up once their cached copy expires.
-- **Forms and CSRF tokens:** Craft marks a page that outputs a CSRF token as private, so it isn't cached. Turn on Craft's `asyncCsrfInputs` to cache pages with forms: `csrfInput()` then loads its token with JavaScript.
+- **Forms and CSRF tokens:** `csrfInput()` marks its page as private, so it isn't cached. Turn on Craft's `asyncCsrfInputs` to cache pages with forms: `csrfInput()` then loads its token with JavaScript. A template that prints `csrf_token()` or `craft.app.request.csrfToken` directly is *not* detected: that page would be cached with someone else's token. Use `csrfInput()`.
 - **No retries:** a server that misses a purge keeps its old pages until they expire or the cache is cleared.
 - **Bulk resaves:** bans are merged per request or queue job, so a resave adds one ban per job, not per element. A long import that runs as many jobs still adds many; Varnish's ban lurker clears them in the background. Keep an eye on `varnishadm ban.list` during large imports.
 
 ## Development
 
-The tests use Codeception with Craft's test module, and need an empty `testing` database. The suite wipes and reinstalls it on every run.
-
 ```bash
 composer install
-composer test
+composer test        # PHPUnit (Orchestra Testbench)
+composer ci          # Pint + Larastan
 ```
 
-`tests/_craft/config/db.php` sets the connection, and can be overridden with `DB_SERVER`, `DB_USER` and `DB_PASSWORD`. `tests/_bootstrap.php` clears any `CRAFT_DB_*` environment variables first, because hosts like ddev set those and they would otherwise point the suite at your project's database. It refuses to run unless the database resolves to `testing`.
+In ddev: `ddev exec -d /var/www/html/code/craft-varnish-purger composer test`.
 
-In ddev:
-
-```bash
-ddev mysql -uroot -proot -e "CREATE DATABASE IF NOT EXISTS testing"
-ddev exec -d /var/www/html/code/craft-varnish-purger composer test
-```
-
-CI runs ECS, PHPStan and the tests on every push and pull request (`.github/workflows/ci.yml`).
+CI runs Pint, Larastan, the tests and compiles both example VCLs on every push and pull request (`.github/workflows/ci.yml`).
 
 AI agents working with this plugin (installing it, writing a VCL, debugging a hosting setup) should also read [`AGENTS.md`](AGENTS.md): it has the background, edge cases and hosting pitfalls in full.

@@ -6,6 +6,8 @@ on:
     branches:
       - main
       - develop
+      - v6
+      - develop-v6
 permissions:
   contents: read
 concurrency:
@@ -16,49 +18,22 @@ jobs:
     name: ci
     uses: studioespresso/.github/.github/workflows/ci.yml@main
     with:
-      craft_version: '5'
-      php_version: '8.4'
-      jobs: '["ecs", "phpstan"]'
+      php_version: '8.5'
+      craft_version: '6'
+      jobs: '["pint", "larastan"]'
     secrets:
       token: ${{ secrets.GITHUB_TOKEN }}
 
   tests:
-    name: tests (PHP ${{ matrix.php }})
+    name: tests
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        # Lowest supported PHP (composer.json require + config.platform) up to the newest
-        php: ['8.3', '8.4', '8.5']
-    services:
-      mysql:
-        image: mysql:8.0
-        env:
-          MYSQL_ROOT_PASSWORD: root
-          # tests/_bootstrap.php refuses to run against any other database
-          MYSQL_DATABASE: testing
-        ports:
-          - 3306:3306
-        options: --health-cmd="mysqladmin ping" --health-interval=10s --health-timeout=5s --health-retries=3
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup PHP
-        uses: shivammathur/setup-php@v2
+      - uses: actions/checkout@v6
+      - uses: shivammathur/setup-php@v2
         with:
-          php-version: ${{ matrix.php }}
-          extensions: mbstring, pdo, pdo_mysql, intl
-
-      - name: Install dependencies
-        run: composer install --no-interaction --prefer-dist
-
-      - name: Run tests
-        run: vendor/bin/codecept run unit
-        env:
-          DB_SERVER: 127.0.0.1
-          DB_USER: root
-          DB_PASSWORD: root
-          DB_PORT: 3306
+          php-version: '8.5'
+      - run: composer install --no-interaction --prefer-dist
+      - run: vendor/bin/phpunit
 
   vcl:
     name: vcl (${{ matrix.file }} on Varnish ${{ matrix.varnish }})

@@ -1,17 +1,17 @@
 <?php
 
-namespace studioespresso\varnish\tests\unit;
+namespace studioespresso\varnish\tests\Unit;
 
-use Codeception\Test\Unit;
+use Orchestra\Testbench\TestCase;
 use studioespresso\varnish\models\Settings;
 use studioespresso\varnish\services\Purger;
 
-class SettingsTest extends Unit
+class SettingsTest extends TestCase
 {
-    public function testTableRowsBecomeUrls(): void
+    public function test_table_rows_become_urls(): void
     {
-        $settings = new Settings();
-        $settings->setAttributes(['purgeUrls' => [
+        $settings = new Settings;
+        $settings->setAttributes(['servers' => [
             ['host' => 'varnish', 'port' => '80'],
             ['host' => '10.0.0.11', 'port' => '6081'],
             ['host' => 'https://cache.internal', 'port' => '443'],
@@ -29,23 +29,23 @@ class SettingsTest extends Unit
         ], $settings->purgeUrls);
     }
 
-    public function testEmptyTableClearsServers(): void
+    public function test_empty_table_clears_servers(): void
     {
         $settings = new Settings(['purgeUrls' => ['http://varnish']]);
-        $settings->setAttributes(['purgeUrls' => '']);
+        $settings->setAttributes(['servers' => '']);
 
         $this->assertSame([], $settings->purgeUrls);
     }
 
-    public function testConfigFileUrlsAreKeptAsIs(): void
+    public function test_config_file_urls_are_kept_as_is(): void
     {
-        $settings = new Settings();
+        $settings = new Settings;
         $settings->setAttributes(['purgeUrls' => ['http://varnish', '$VARNISH_URL']]);
 
         $this->assertSame(['http://varnish', '$VARNISH_URL'], $settings->purgeUrls);
     }
 
-    public function testUrlsBecomeTableRows(): void
+    public function test_urls_become_table_rows(): void
     {
         $settings = new Settings(['purgeUrls' => [
             'http://varnish',
@@ -62,7 +62,7 @@ class SettingsTest extends Unit
         ], $settings->getServers());
     }
 
-    public function testRowsSurviveARoundTrip(): void
+    public function test_rows_survive_a_round_trip(): void
     {
         $urls = ['http://varnish', 'http://10.0.0.11:6081', 'https://cache.internal:8443'];
         $settings = new Settings(['purgeUrls' => $urls]);
@@ -71,7 +71,7 @@ class SettingsTest extends Unit
         $this->assertSame($urls, $settings->purgeUrls);
     }
 
-    public function testEnvironmentVariablesAreResolved(): void
+    public function test_environment_variables_are_resolved(): void
     {
         putenv('VARNISH_TEST_URL=http://varnish-from-env:6081');
         try {
@@ -83,7 +83,7 @@ class SettingsTest extends Unit
         }
     }
 
-    public function testResolveMapsHostnameToIp(): void
+    public function test_resolve_maps_hostname_to_ip(): void
     {
         putenv('VARNISH_TEST_IP=203.0.113.10');
         try {
@@ -99,20 +99,20 @@ class SettingsTest extends Unit
         }
     }
 
-    public function testHostnamesAreNormalised(): void
+    public function test_hostnames_are_normalised(): void
     {
         putenv('VARNISH_TEST_HOST=WWW.Example.com:443, shop.example.com.');
         try {
             $settings = new Settings(['hostnames' => ['jan.example.com', '$VARNISH_TEST_HOST', ' jan.example.com ', '', '$VARNISH_TEST_UNSET', 'bad/host']]);
 
             $this->assertSame(['jan.example.com', 'www.example.com', 'shop.example.com'], $settings->getResolvedHostnames());
-            $this->assertSame([], (new Settings())->getResolvedHostnames(), 'empty by default: no limit');
+            $this->assertSame([], (new Settings)->getResolvedHostnames(), 'empty by default: no limit');
         } finally {
             putenv('VARNISH_TEST_HOST');
         }
     }
 
-    public function testBanHeaders(): void
+    public function test_ban_headers(): void
     {
         $this->assertSame(['X-Cache-Tags-Ban' => '12|e:s:3'], Purger::banHeaders(['12', 'e:s:3'], null, []));
         $this->assertSame(
@@ -121,7 +121,7 @@ class SettingsTest extends Unit
         );
     }
 
-    public function testInvalidAddressesFailValidation(): void
+    public function test_invalid_addresses_fail_validation(): void
     {
         $this->assertTrue((new Settings(['purgeUrls' => ['http://varnish', 'http://10.0.0.11:6081']]))->validate());
         $this->assertFalse((new Settings(['purgeUrls' => ['http://varnish:99999']]))->validate());

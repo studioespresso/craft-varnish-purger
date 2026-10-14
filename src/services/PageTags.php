@@ -2,22 +2,23 @@
 
 namespace studioespresso\varnish\services;
 
-use Craft;
-use craft\base\ElementInterface;
-use craft\base\NestedElementInterface;
-use craft\elements\db\AssetQuery;
-use craft\elements\db\CategoryQuery;
-use craft\elements\db\ElementQuery;
-use craft\elements\db\EntryQuery;
-use craft\events\DefineValueEvent;
-use craft\fields\BaseRelationField;
-use craft\helpers\ArrayHelper;
-use craft\web\View;
+use CraftCms\Cms\Element\Contracts\ElementInterface;
+use CraftCms\Cms\Element\Queries\AssetQuery;
+use CraftCms\Cms\Element\Queries\EntryQuery;
+use CraftCms\Cms\Element\Queries\Events\ElementQueryCacheTagsResolving;
+use CraftCms\Cms\Field\BaseRelationField;
+use CraftCms\Cms\Http\ResponseHeaders;
+use CraftCms\Cms\Support\Facades\ElementCaches;
+use CraftCms\Cms\Support\Facades\Sections;
+use CraftCms\Cms\Support\Facades\Sites;
+use CraftCms\Cms\View\Events\PageTemplateRendered;
+use CraftCms\Cms\View\Events\PageTemplateRendering;
+use Illuminate\Foundation\Http\Events\RequestHandled;
+use Illuminate\Support\Facades\Event;
+use Illuminate\Support\Facades\Log;
 use studioespresso\varnish\helpers\TagHelper;
 use studioespresso\varnish\Varnish;
-use yii\base\Component;
-use yii\base\Event;
-use yii\web\Response;
+use Symfony\Component\HttpFoundation\Response;
 
 /**
  * Collects Craft's own element cache tags (the ones behind `{% cache %}`) while the page template renders, and sends
@@ -27,48 +28,88 @@ use yii\web\Response;
  * every element query (e.g. `element::craft\elements\Entry::section:3`), and the tags of any `{% cache %}` block
  * served from cache.
  */
-class PageTags extends Component
+class PageTags
 {
     public const HEADER = 'X-Cache-Tags';
+
     /** Site the page belongs to, so a ban can be limited to one site. */
     public const SITE_HEADER = 'X-Cache-Site';
+
     /** Craft cache tag (relative to the element type) added to search queries. */
     public const SEARCH_TAG = 'search';
 
     /** @var string[] Craft tags collected for the current page */
     private array $tags = [];
+
     private ?int $ttl = null;
+
+    /** Forced on by [[track()]]; otherwise decided per request, see [[isTracking()]] */
     private bool $tracking = false;
 
-    /**
-     * Starts collecting tags for the page being rendered. Called by the plugin for front-end GET requests;
-     * tests call it directly from a console request.
-     */
-    public function track(): void
-    {
-        if ($this->tracking) {
-            return;
-        }
-        $this->tracking = true;
+    /** Whether we started the collection for the page template being rendered */
+    private bool $collecting = false;
 
+    /**
+     * Registers the listeners. Whether a page gets tagged is decided when it renders: Craft resolves the site,
+     * tokens and previews in middleware, after plugins boot.
+     */
+    public function listen(): void
+    {
         // Collect only while the page template renders: the route lookup (an unscoped `uri` query) runs before
         // this, and would otherwise tag every page with `Entry::*`, which every entry save invalidates.
-        Event::on(View::class, View::EVENT_BEFORE_RENDER_PAGE_TEMPLATE, function() {
-            Craft::$app->getElements()->startCollectingCacheInfo();
+        Event::listen(PageTemplateRendering::class, function () {
+            if (! $this->collecting && $this->isTracking()) {
+                $this->collecting = true;
+                ElementCaches::startCollectingCacheInfo();
+            }
         });
-        Event::on(View::class, View::EVENT_AFTER_RENDER_PAGE_TEMPLATE, function() {
-            [$dependency, $this->ttl] = Craft::$app->getElements()->stopCollectingCacheInfo();
-            $this->tags = $dependency->tags ?? [];
+        Event::listen(PageTemplateRendered::class, function () {
+            if ($this->collecting) {
+                $this->collecting = false;
+                [$dependency, $this->ttl] = ElementCaches::stopCollectingCacheInfo();
+                $this->tags = $dependency->tags ?? [];
+            }
         });
 
-        Event::on(ElementQuery::class, ElementQuery::EVENT_DEFINE_CACHE_TAGS, function(DefineValueEvent $e) {
+        Event::listen(ElementQueryCacheTagsResolving::class, function (ElementQueryCacheTagsResolving $e) {
+            if (! $this->isTracking()) {
+                return;
+            }
             $this->scopeRelationQuery($e);
             $this->scopeStructureQuery($e);
-            $this->scopeNeoOwnerQuery($e);
             $this->tagSearchQuery($e);
         });
 
-        Craft::$app->getResponse()->on(Response::EVENT_AFTER_PREPARE, fn(Event $e) => $this->prepareResponse($e->sender));
+        Event::listen(RequestHandled::class, fn (RequestHandled $e) => $this->prepareResponse($e->response));
+    }
+
+    /**
+     * Tags pages rendered in this process regardless of the request; for tests.
+     */
+    public function track(): void
+    {
+        $this->tracking = true;
+    }
+
+    /**
+     * Front-end GET page requests: not CP, action, preview or token requests.
+     */
+    public function isTracking(): bool
+    {
+        if ($this->tracking) {
+            return true;
+        }
+        if (app()->runningInConsole()) {
+            return false;
+        }
+        $request = request();
+
+        return $request->isSiteRequest()
+            && $request->isMethod('GET')
+            && ! $request->isActionRequest()
+            && ! $request->isPreview()
+            // Tokens can route to other content (shared drafts, custom token routes) under a normal URL
+            && ! $request->getHadToken();
     }
 
     /**
@@ -76,34 +117,40 @@ class PageTags extends Component
      */
     public function prepareResponse(Response $response): void
     {
-        $headers = $response->getHeaders();
-        // An `<esi:include>` can also come from a `{% cache %}` block, which skips craft.varnish.include()
-        if (is_string($response->content) && str_contains($response->content, '<esi:include')) {
+        $headers = $response->headers;
+        // An `<esi:include>` can come from craft.varnish.include() or from a `{% cache %}` block around one
+        $content = $response->getContent();
+        if (is_string($content) && str_contains($content, '<esi:include')) {
             $headers->set('Surrogate-Control', 'content="ESI/1.0"');
         }
 
         $tags = $this->getTags();
-        if ($response->getStatusCode() !== 200 || !$tags) {
+        if ($response->getStatusCode() !== 200 || ! $tags) {
             return;
         }
-        // Private pages (e.g. a `csrfInput()` without asyncCsrfInputs, or a started PHP session) must never be shared
-        $cacheControl = implode(',', [(string)$headers->get('Cache-Control'), ...preg_grep('/^Cache-Control:/i', headers_list())]);
-        if (preg_match('/no-store|private/i', $cacheControl)) {
+        // Private pages (e.g. a `csrfInput()` without asyncCsrfInputs) must never be shared. Symfony's default for
+        // a response that doesn't set Cache-Control (`no-cache, private`) doesn't count.
+        $private = $headers->get('Cache-Control') !== 'no-cache, private'
+            && ($headers->hasCacheControlDirective('no-store') || $headers->hasCacheControlDirective('private'));
+        if ($private || app(ResponseHeaders::class)->noCache) {
             return;
         }
         $header = implode(' ', $tags);
         $max = Varnish::getInstance()->getSettings()->maxTagsHeaderLength;
         if (strlen($header) > $max) {
-            $request = Craft::$app->getRequest();
-            $url = $request->getIsConsoleRequest() ? 'page' : $request->getUrl();
-            Craft::warning(sprintf('Not caching %s in Varnish: its %s header would be %d bytes (maxTagsHeaderLength: %d).', $url, self::HEADER, strlen($header), $max), __METHOD__);
+            $url = app()->runningInConsole() ? 'page' : request()->getRequestUri();
+            Log::warning(sprintf('Not caching %s in Varnish: its %s header would be %d bytes (maxTagsHeaderLength: %d).', $url, self::HEADER, strlen($header), $max));
+
             return;
         }
         $headers->set(self::HEADER, $header);
-        $headers->set(self::SITE_HEADER, (string)Craft::$app->getSites()->getCurrentSite()->id);
-        // Craft shortens this for expiring entries; otherwise it's the cacheDuration config setting.
+        $headers->set(self::SITE_HEADER, (string) Sites::getCurrentSite()->id);
+        // Explicitly public, or Symfony adds `private` and Varnish's built-in VCL won't cache the page. The VCL
+        // tells browsers `no-cache` for cached pages.
+        $headers->addCacheControlDirective('public');
+        // Shorter for entries with an expiry date
         if ($this->ttl) {
-            $headers->set('X-Cache-Ttl', (string)$this->ttl);
+            $headers->set('X-Cache-Ttl', (string) $this->ttl);
         }
     }
 
@@ -114,9 +161,10 @@ class PageTags extends Component
      */
     public function getTags(): array
     {
-        if (!$this->tags) {
+        if (! $this->tags) {
             return [];
         }
+
         return array_values(array_unique([TagHelper::TAG_ALL, ...array_map(TagHelper::headerTag(...), $this->tags)]));
     }
 
@@ -125,29 +173,29 @@ class PageTags extends Component
      * (and after its purge). Tag search queries `{type}:search` so [[Purger::queueSearchIndexed()]] can purge them
      * once the index is up to date.
      */
-    private function tagSearchQuery(DefineValueEvent $e): void
+    private function tagSearchQuery(ElementQueryCacheTagsResolving $e): void
     {
-        if (!$e->sender instanceof ElementQuery || !$e->sender->search) {
+        if (! $e->query->search) {
             return;
         }
         // An empty value would get Craft's catch-all `*` tag; keep it, since any new element could match.
-        $e->value = [...($e->value ?: ['*']), self::SEARCH_TAG];
+        $e->tags = [...($e->tags ?: ['*']), self::SEARCH_TAG];
     }
 
     /**
      * Craft filters relation field queries with a join, so they carry no section or group and get the catch-all
-     * `*` tag: every entry (or category) save would purge every page using such a field. Scope them to the field's
-     * sources instead; a source element saving its relations is covered by its own `element::{id}` tag.
+     * `*` tag: every entry save would purge every page using such a field. Scope them to the field's
+     * sections instead; a source element saving its relations is covered by its own `element::{id}` tag.
      */
-    private function scopeRelationQuery(DefineValueEvent $e): void
+    private function scopeRelationQuery(ElementQueryCacheTagsResolving $e): void
     {
-        $query = $e->sender;
-        if ($e->value || !($query instanceof EntryQuery || $query instanceof CategoryQuery || $query instanceof AssetQuery) || !$query->eagerLoadSourceElement) {
+        $query = $e->query;
+        if ($e->tags || ! ($query instanceof EntryQuery || $query instanceof AssetQuery) || ! $query->eagerLoadSourceElement) {
             return;
         }
-        $handle = substr((string)strrchr(':' . $query->eagerLoadHandle, ':'), 1);
+        $handle = substr((string) strrchr(':'.$query->eagerLoadHandle, ':'), 1);
         $field = $query->eagerLoadSourceElement->getFieldLayout()?->getFieldByHandle($handle);
-        if (!$field instanceof BaseRelationField) {
+        if (! $field instanceof BaseRelationField) {
             return;
         }
         // Assets fields usually allow every volume, and sites tend to have one main volume, so a volume scope would
@@ -157,42 +205,37 @@ class PageTags extends Component
         // after deleting one) until the TTL; scope to the field's volumes if that matters.
         if ($query instanceof AssetQuery) {
             if ($query->eagerLoadSourceElement->id) {
-                $e->value = ["element::{$query->eagerLoadSourceElement->id}"];
+                $e->tags = ["element::{$query->eagerLoadSourceElement->id}"];
             }
+
             return;
         }
-        // Entries fields list several `sources`; Categories fields have a single `source`.
         $sources = $field->allowMultipleSources ? $field->sources : [$field->source];
-        if (!is_array($sources)) {
+        if (! is_array($sources)) {
             return;
         }
         $tags = [];
         foreach ($sources as $source) {
-            $tag = match (true) {
-                $query instanceof EntryQuery && str_starts_with((string)$source, 'section:') =>
-                    ($section = Craft::$app->getEntries()->getSectionByUid(substr($source, 8))) ? "section:$section->id" : null,
-                $query instanceof CategoryQuery && str_starts_with((string)$source, 'group:') =>
-                    ($group = Craft::$app->getCategories()->getGroupByUid(substr($source, 6))) ? "group:$group->id" : null,
-                default => null,
-            };
-            // ponytail: only plain section/group sources are scoped; anything else (singles, custom sources) keeps `*`.
-            if (!$tag) {
+            $section = str_starts_with((string) $source, 'section:') ? Sections::getSectionByUid(substr($source, 8)) : null;
+            $tag = $section ? "section:$section->id" : null;
+            // ponytail: only plain section sources are scoped; anything else (singles, custom sources) keeps `*`.
+            if (! $tag) {
                 return;
             }
             $tags[] = $tag;
         }
-        $e->value = $tags;
+        $e->tags = $tags;
     }
 
     /**
-     * Structure queries (`entry.ancestors`, `.children`, `.siblings`, Neo's nested blocks) filter on a structure, not a
-     * section, so Craft gives them the catch-all `*` tag too. Scope them to what owns the structure, which is what
-     * a save or move in it invalidates: the entry section, the category group, or (Neo) the block field and owner.
+     * Structure queries (`entry.ancestors`, `.children`, `.siblings`) filter on a structure, not a section, so Craft
+     * gives them the catch-all `*` tag too. Scope them to the section that owns the structure, which is what a save
+     * or move in it invalidates.
      */
-    private function scopeStructureQuery(DefineValueEvent $e): void
+    private function scopeStructureQuery(ElementQueryCacheTagsResolving $e): void
     {
-        $query = $e->sender;
-        if ($e->value || !$query instanceof ElementQuery) {
+        $query = $e->query;
+        if ($e->tags) {
             return;
         }
         $relative = $query->descendantOf ?? $query->ancestorOf ?? $query->siblingOf ?? $query->prevSiblingOf
@@ -200,49 +243,12 @@ class PageTags extends Component
         if ($relative === null) {
             return;
         }
-        // Neo keeps one structure per field and owner; saving one of its blocks invalidates `field-owner:{field}-{owner}`
-        // (matched by name: Neo isn't a dependency)
-        if ($relative instanceof NestedElementInterface && is_a($relative, 'benf\neo\elements\Block')) {
-            $e->value = [sprintf('field-owner:%s-%s', $relative->getField()?->id, $relative->getPrimaryOwnerId())];
-            return;
-        }
         $structureId = $query->structureId ?: ($relative instanceof ElementInterface ? $relative->structureId : null);
-        if (!is_numeric($structureId)) {
+        if (! is_numeric($structureId)) {
             return;
         }
-        $tag = match (true) {
-            $query instanceof EntryQuery =>
-                ($section = ArrayHelper::firstWhere(Craft::$app->getEntries()->getAllSections(), 'structureId', $structureId)) ? "section:$section->id" : null,
-            $query instanceof CategoryQuery =>
-                ($group = ArrayHelper::firstWhere(Craft::$app->getCategories()->getAllGroups(), 'structureId', $structureId)) ? "group:$group->id" : null,
-            default => null,
-        };
-        if ($tag) {
-            $e->value = [$tag];
+        if ($query instanceof EntryQuery && ($section = Sections::getAllSections()->firstWhere('structureId', (int) $structureId))) {
+            $e->tags = ["section:$section->id"];
         }
-    }
-
-    /**
-     * Neo's block query only scopes to an owner by `primaryOwnerId`. A Neo field value (`entry.contentBuilder`)
-     * filters on `ownerId`, so it falls back to `field:{id}`, which a block save in that field on *any* entry
-     * invalidates. Use the `field-owner` tag Neo invalidates for that owner's blocks instead.
-     */
-    private function scopeNeoOwnerQuery(DefineValueEvent $e): void
-    {
-        $query = $e->sender;
-        // (matched by name: Neo isn't a dependency)
-        if (!is_a($query, 'benf\neo\elements\db\BlockQuery') || $query->primaryOwnerId || !$query->ownerId || !$query->fieldId) {
-            return;
-        }
-        if (array_diff((array)$e->value, array_map(fn($id) => "field:$id", (array)$query->fieldId))) {
-            return;
-        }
-        $tags = [];
-        foreach ((array)$query->fieldId as $fieldId) {
-            foreach ((array)$query->ownerId as $ownerId) {
-                $tags[] = "field-owner:$fieldId-$ownerId";
-            }
-        }
-        $e->value = $tags;
     }
 }

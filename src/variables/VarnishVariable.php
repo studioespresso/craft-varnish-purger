@@ -13,6 +13,8 @@ class VarnishVariable
     /**
      * Includes a template as an ESI fragment behind Varnish, or inline elsewhere:
      * `{{ craft.varnish.include('_esi/now') }}`
+     *
+     * @param  array<string, mixed>  $variables
      */
     public function include(string $template, array $variables = []): Markup
     {

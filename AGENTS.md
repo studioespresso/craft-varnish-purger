@@ -1,6 +1,6 @@
 # AGENTS.md — Varnish Purger for Craft CMS
 
-Guidance for AI agents (Claude Code, Cursor, …) working with **Varnish Purger** (`studioespresso/craft-varnish-purger`,
+Guidance for AI agents (Claude Code, Cursor, …) working with **Varnish Purger** (`studioespresso/craft-varnish-purger`, 6.x for Craft CMS 6 / Laravel,
 handle `varnish`, namespace `studioespresso\varnish`): installing it on a site, writing or debugging the VCL, changing
 templates on a cached site, or working on the plugin itself. The README is the short human version; this file has the
 background and the things that went wrong in real setups.
@@ -12,28 +12,33 @@ hosting. Never assume a setup works because Craft is configured: verify it with 
 ## Mental model
 
 1. **Tagging.** For front-end `GET` site requests (not CP, action, preview or token requests), the plugin switches on
-   Craft's own element cache tag collection (`Elements::startCollectingCacheInfo()`, the mechanism behind `{% cache %}`)
+   Craft's own element cache tag collection (`ElementCaches::startCollectingCacheInfo()`, the mechanism behind `{% cache %}`)
    while the *page template* renders. Craft records:
    - every element the template outputs (`element::{id}`), including related entries, assets and Matrix entries;
-   - every element query, scoped as far as Craft can (`element::craft\elements\Entry::section:3`, `entryType:4`,
+   - every element query, scoped as far as Craft can (`element::CraftCms\Cms\Entry\Elements\Entry::section:3`, `entryType:4`,
      `field:6` for Matrix…), or the catch-all `::*` for unscoped queries;
    - the tags stored with any `{% cache %}` block that's served from cache.
-   Collection starts at `View::EVENT_BEFORE_RENDER_PAGE_TEMPLATE` on purpose: Craft's route lookup (an unscoped `uri`
-   query) runs before that and would otherwise give every page `Entry::*`, purged by every entry save.
-2. **Response headers.** On a `200` response that isn't private (`Cache-Control: no-store`/`private`, also from a PHP
-   session start) and whose tag header stays under `maxTagsHeaderLength` (4000 bytes; longer pages are left untagged,
+   Collection starts at the `PageTemplateRendering` event on purpose: Craft's route lookup (an unscoped `uri`
+   query) runs before that and would otherwise give every page `Entry::*`, purged by every entry save. Whether a
+   request qualifies is decided at that point too, not at plugin boot: Craft resolves the site, tokens and previews in
+   middleware, after plugins boot.
+2. **Response headers.** In Laravel's `RequestHandled` event, on a `200` response that isn't private (explicit
+   `Cache-Control: no-store`/`private`, or Craft's `ResponseHeaders::noCache()`, which `csrfInput()` calls) and whose tag header stays under `maxTagsHeaderLength` (4000 bytes; longer pages are left untagged,
    so uncached, with a warning: an over-long header fails the response in Varnish or an nginx in between), the plugin adds:
    - `X-Cache-Tags: all e 12 e:s:3 …` — the shortened tags (see below), `all` on every page;
    - `X-Cache-Site: 1` — the Craft site ID;
-   - `X-Cache-Ttl: 86400` — Craft's suggested lifetime (shorter when a shown entry has an expiry date), the VCL turns
-     it into the object's TTL and removes the header.
+   - `X-Cache-Ttl: 3600` — only when a shown entry has an expiry date; the VCL turns it into the object's TTL
+     (default 1 day) and removes the header;
+   - `Cache-Control: public`. Symfony reports `no-cache, private` for every response that doesn't set
+     Cache-Control, and Varnish's built-in VCL refuses to cache `private`/`no-cache`; that exact default value is
+     therefore not treated as private. The VCL sends browsers `no-cache` for cached pages.
 3. **Caching.** The VCL caches only responses that carry `X-Cache-Tags`. Everything else (404s, redirects, CP,
    actions, previews, POSTs, logged-in users) passes through uncached. It strips cookies from cacheable requests and
    `Set-Cookie` from cached responses, and stores the hostname as `X-Cache-Host` (hidden from visitors).
-4. **Invalidation.** Craft fires `Elements::EVENT_INVALIDATE_CACHES` on save, delete, restore, move and Matrix owner
-   changes, with exactly the tags to clear. The plugin queues them and, at the end of the request (and after every queue
-   job, since a `queue/listen` worker never ends its request; a shutdown function catches requests that ended in an
-   exception), sends one `BAN` per configured server, site scope and chunk of 100 tags, all in parallel. Exceptions
+4. **Invalidation.** Craft fires `ElementCachesInvalidated` on save, delete, restore, move and Matrix owner
+   changes, with exactly the tags to clear. The plugin queues them and, at the end of the request (`$app->terminating()`, after the
+   response is sent), after every queue job (`JobProcessed`/`JobExceptionOccurred`, since a `queue:work` worker never
+   ends its request), or in a shutdown function for fatal errors, sends one `BAN` per configured server, site scope and chunk of 100 tags, all in parallel. Exceptions
    while banning are logged, never thrown, so a failed ban can't turn a successful save into an error page:
    ```
    BAN https://www.example.com/
@@ -54,7 +59,7 @@ only needs to be deterministic (a collision can only over-purge).
 |---|---|---|
 | `all` | `element` | every page (used for "purge everything") |
 | `12` | `element::12` | the page outputs element 12 |
-| `e` | `element::craft\elements\Entry` | the page ran some entry query (only type-wide invalidation clears it) |
+| `e` | `element::CraftCms\Cms\Entry\Elements\Entry` | the page ran some entry query (only type-wide invalidation clears it) |
 | `e:s:3` | `…Entry::section:3` | queried section 3 |
 | `e:t:4` | `…Entry::entryType:4` | queried entry type 4 |
 | `e:f:6` | `…Entry::field:6` | Matrix field 6 (nested entries) |
@@ -64,30 +69,28 @@ only needs to be deterministic (a collision can only over-purge).
 Type letters: `e` entry, `c` category, `a` asset, `u` user, `t` tag, `g` global set, `b` content block, `ad` address,
 `p` Commerce product, `v` Commerce variant (others keep their refHandle or lowercase class name). Scope letters: `s`
 section, `t` entry type, `f` field, `o` owner, `g` group, `v` volume, `pt` product type. Anything else (e.g. tags added by
-other plugins via `ElementQuery::EVENT_DEFINE_CACHE_TAGS`) is squeezed into `[A-Za-z0-9:._-]`.
+other plugins via the `ElementQueryCacheTagsResolving` event) is squeezed into `[A-Za-z0-9:._-]`.
 
 ## Invalidation rules and their edge cases
 
 - **Drafts and revisions** never purge (autosaves would empty the cache otherwise), and neither do their search index
-  jobs. Needs Craft 5.2+ (`InvalidateElementCachesEvent::$element`).
+  jobs (`ElementCachesInvalidated::$element`).
 - **Relation fields.** Craft gives relation field queries the catch-all `*` tag, which would purge every page using a
-  relation field on any save. The plugin narrows Entries fields to their sections and Categories fields to their group
-  (`PageTags::scopeRelationQuery()`). Only plain `section:`/`group:` sources are narrowed; other sources keep `*`.
+  relation field on any save. The plugin narrows Entries fields to their sections (`PageTags::scopeRelationQuery()`).
+  Only plain `section:` sources are narrowed; other sources keep `*`. Legacy categories/tags (Yii2 adapter) aren't
+  narrowed (the Craft 5 version scoped Categories fields to their group).
   Assets fields are tagged with the element that owns the field (`element::{id}`) instead: they usually allow every
   volume, so a volume scope would still purge on every upload. Editing the relation saves the owner, and every shown
   asset has its own tag; a related asset the page doesn't show changing state (disabled → enabled, or a count after
   deleting one) only shows after the TTL.
 - **Structures.** Structure queries (`entry.ancestors`, `.children`, `.siblings`) get `*` too; the plugin scopes them
-  to the section or category group that owns the structure (`PageTags::scopeStructureQuery()`). `entry.parent` is
+  to the section that owns the structure (`PageTags::scopeStructureQuery()`). `entry.parent` is
   looked up by ID and needs nothing. Craft also invalidates the *whole element type* after an element is inserted or
-  moved in a structure (craftcms/cms#14846), so reordering entries in a structure section still purges every page
+  moved in a structure (craftcms/cms#14846, still the case in `Structures::moveElement()` on Craft 6), so reordering entries in a structure section still purges every page
   with an entry query.
-- **Neo.** Neo keeps one block structure per field and owner. Its nested block queries (`block.children`) are scoped to
-  `field-owner:{field}-{owner}`, and so is a Neo field value (`entry.contentBuilder`), which Neo itself only scopes to
-  `field:{id}` (it checks `primaryOwnerId`, the field value sets `ownerId`) (`PageTags::scopeNeoOwnerQuery()`). Neo
-  rebuilds the structure on every owner save, after which Craft invalidates the whole block type; the plugin skips
-  that one type-wide ban (`Purger::startStructureChange()`), since the owner save already bans the owner and its
-  `field-owner` tag. Neo is matched by class name, it isn't a dependency.
+- **Neo.** Not supported on 6.x: Neo has no Craft 6 release. 1.x scoped Neo's block structures to
+  `field-owner:{field}-{owner}` and skipped the type-wide ban after Neo rebuilt a structure; re-add that once Neo is
+  ported and its class names are known.
 - **Multi-site.** A save that only changes translatable content (translatable fields, a translatable title) is banned
   on that site only (`X-Cache-Site-Ban`). Everything else bans on all sites, because Craft silently propagates shared
   values to the other sites: untranslatable fields (relation fields are shared by default), post date, global status,
@@ -99,7 +102,7 @@ other plugins via `ElementQuery::EVENT_DEFINE_CACHE_TAGS`) is squeezed into `[A-
   site's content (`.site('*')`) is not purged by a change scoped to that other site.
 - **Search.** CP saves (web requests) update Craft's search index in a queue job *after* the save and its purge. A
   search page re-cached in between would miss the new content, so search queries get an extra `e:search` tag and the
-  plugin bans it again when Craft's `UpdateSearchIndex` job finishes (`Queue::EVENT_AFTER_EXEC`). Console saves index
+  plugin bans it again when Craft's `UpdateSearchIndex` job finishes (Laravel's `JobProcessed` event). Console saves index
   immediately. `e:search` is per element type, not per section, so indexing any entry also purges section-limited
   search pages (over-purge, never stale).
 - **Expiry vs post dates.** Expiry dates shorten the TTL via `X-Cache-Ttl`. A *future post date* triggers nothing when
@@ -109,27 +112,22 @@ other plugins via `ElementQuery::EVENT_DEFINE_CACHE_TAGS`) is squeezed into `[A-
   so they aren't cached.
 - **Data that isn't an element** never purges by itself: plugin records, settings, project config changes (a new
   section or single), Navigate menus (unless the Navigate version in use calls `invalidateAllCaches()` when nodes change), anything in custom tables.
-  Call `Craft::$app->getElements()->invalidateAllCaches()` (or `invalidateCachesForElement()`) after changing such
+  Call `ElementCaches::invalidateAll()` (or `invalidateForElement()`, `CraftCms\Cms\Support\Facades\ElementCaches`) after changing such
   data; the plugin listens to those and Craft's own template caches stay in sync. After deploys, run
   `php craft varnish/purge` (template/CSS/JS changes aren't elements either).
 
-## Configuration (`config/varnish.php` or Settings → Plugins → Varnish)
+## Configuration (`config/craft/varnish.php` or Settings → Plugins → Varnish)
+
+A plain Laravel config file (publish it with `php artisan vendor:publish --tag=varnish`); its values override the CP
+settings. Craft 5's per-environment keys (`'*'`, `'dev'`…) are gone: use `env()`.
 
 ```php
 <?php
 
-use craft\helpers\App;
-
 return [
-    '*' => [],
-    'dev' => [
-        'purgeUrls' => ['http://varnish'],
-    ],
-    'production' => [
-        'purgeUrls' => ['https://www.example.com'],
-        'resolve' => ['www.example.com' => App::env('VARNISH_ORIGIN_IP')],
-        'hostnames' => ['example.com', 'www.example.com'],
-    ],
+    'purgeUrls' => array_filter([env('VARNISH_URL')]),
+    'resolve' => ['www.example.com' => env('VARNISH_ORIGIN_IP')],
+    'hostnames' => ['example.com', 'www.example.com'],
 ];
 ```
 
@@ -145,9 +143,8 @@ return [
   everything" empties their cache. List every hostname this install's pages are cached under, www-variants and aliases
   included: pages under a missing hostname are never purged again. Empty (default) = no limit. Not derived from site
   base URLs on purpose, because aliases are easy to miss.
-- **Multi-environment gotcha:** Craft merges `'*'` into the active environment with `ArrayHelper::merge()`, which
-  *appends* lists. Never set `purgeUrls` in `'*'` and in an environment: both sets of servers would receive bans.
-  Environment keys match on substrings (`'prod'` also matches `production`).
+- The CP edits the servers as a `servers` table of host/port rows (`Settings::getServers()`/`setServers()`);
+  only `purgeUrls` is stored in project config.
 
 ## The VCL
 
@@ -226,22 +223,22 @@ denial of service). Which IP to check depends on how requests reach Varnish:
 
 ## Forms, CSRF and ESI
 
-- Craft marks any response that prints a CSRF token as uncacheable (`Request::getCsrfToken()` sends
-  `Cache-Control: no-store`), and Varnish honours it. Enable `->asyncCsrfInputs(true)` in `config/general.php`:
+- `csrfInput()` (without async) calls `ResponseHeaders::noCache()`, so Craft sends `Cache-Control: no-store` and the
+  plugin doesn't tag the page. Enable `->asyncCsrfInputs(true)` in `config/general.php`:
   `csrfInput()` then outputs `<craft-csrf-input>` and Craft's JS fetches the token (and sets the cookie) from
   `/actions/users/session-info`. Formie's form template uses `csrfInput()`, so Formie works with it; captcha tokens are
-  not covered (use Formie's `refreshForCache()`). Templates printing `craft.app.request.csrfToken` directly still make
-  the page `no-store`: the plugin doesn't tag it and the VCL doesn't cache it (before both checks existed, such a
-  page was cached with its `Set-Cookie` stripped, so every form post failed CSRF validation).
+  not covered (use Formie's `refreshForCache()`). **Unlike Craft 5, printing `csrf_token()` /
+  `craft.app.request.csrfToken` directly does not mark the page private** on Craft 6: such a page gets tagged and
+  cached with one visitor's token (and its `Set-Cookie` stripped), so form posts fail. Use `csrfInput()`.
 - **ESI:** `{{ craft.varnish.include('_partials/stock', {productId: product.id}) }}`. Behind Varnish (request header
   `Surrogate-Capability: …ESI/1.0`, set by the VCL) it outputs `<esi:include src="/actions/varnish/esi/render?data=…">`
-  and sets `Surrogate-Control: content="ESI/1.0"` so the VCL enables `do_esi`; elsewhere it renders inline. The data is
-  signed with Craft's security key (`Security::hashData()`), so the action can't render arbitrary templates; tampered
-  data gets a 400. Signed, not encrypted: template name and variables are readable, so nothing secret. The payload
+  and the response gets `Surrogate-Control: content="ESI/1.0"` so the VCL enables `do_esi`; elsewhere it renders
+  inline. The data (base64url JSON) is signed with an HMAC of the app key (`signature` param), so the action can't
+  render arbitrary templates; tampered data gets a 400. Signed, not encrypted: template name and variables are readable, so nothing secret. The payload
   carries the page's site ID and the action switches to it (with path-based sites the action URL may resolve to the
-  primary site). A fragment that throws returns an empty 500 body and logs the error (rethrown in devMode), so no
-  error page ends up inside the page. Any response containing `<esi:include` gets `Surrogate-Control` too, so includes
-  inside a `{% cache %}` block (which skip `include()`) still work. Fragments are action requests: never tagged, never
+  primary site). A fragment that throws returns an empty 500 body and logs the error (rethrown with `devMode` on), so no
+  error page ends up inside the page. The `Surrogate-Control` header is added to any response containing `<esi:include`, so
+  includes inside a `{% cache %}` block (which skip `include()`) work too. Fragments are action requests: never tagged, never
   cached. Pass scalars only. **Fragments cannot set
   cookies** (Varnish ignores fragment response headers): never use ESI for CSRF tokens.
 - **Image transforms:** use `asset.getUrl(transform, true)` on cached pages so the cached HTML holds the final URL, not
@@ -257,10 +254,13 @@ php craft varnish/purge --site=french   # one site (handle or ID)
 php craft clear-caches/varnish          # everything, without per-server output
 ```
 
+The commands are `varnish:check`/`varnish:purge` (so `php artisan varnish:check` works too); `varnish/check` and
+`varnish/purge` are aliases.
+
 Both commands exit non-zero on failure. `varnish/check` interprets the answers: 403 → add the shown IP to `acl purge`;
 no response → wrong address/port or unreachable (and "HTTP/0.9" means the admin port); `?` → a 200 that isn't
 "Ban added" (another VCL or a host purge endpoint answered). Every ban is also logged per server: failures always,
-successes with devMode on.
+successes at info level.
 
 ## Debugging playbook (in this order)
 
@@ -286,13 +286,16 @@ successes with devMode on.
 
 - Layout: `Varnish.php` (wiring), `services/PageTags.php` (collect/scope/headers), `services/Purger.php` (queue,
   site-scoping, BAN delivery), `services/Esi.php` + `controllers/EsiController.php`, `helpers/TagHelper.php`,
-  `models/Settings.php` + `templates/_settings.twig`, `console/controllers/{Check,Purge}Controller.php`.
-- PHP 8.3+ (`composer.json` `require.php` and `config.platform.php`, so the lock installs on 8.3; CI tests 8.3–8.5).
-- Tests: Codeception with Craft's test module (`composer test`), needing an empty `testing` database the suite wipes.
-  `tests/_bootstrap.php` clears all `CRAFT_DB_*` env vars (ddev sets them, and they would point the suite at the
-  project database) and refuses to run unless the database resolves to `testing`. Never remove that guard.
+  `routes/actions.php` (the ESI action), `models/Settings.php` (the CP form is `Varnish::settingsForm()`),
+  `console/{Check,Purge}Command.php`, `config/varnish.php` (publishable config).
+- Craft 6 (alpha), PHP 8.5. `main`/1.x is the Craft 5 version.
+- Tests: PHPUnit with Orchestra Testbench (`composer test`), no database: they cover tag mapping and settings. Tagging
+  and purging were verified against a real Craft 6 install (a page template, a fake BAN listener, `resave:entries`,
+  `queue:work`); note `php craft tinker` runs code in a forked child that's killed, so terminating callbacks and
+  shutdown functions never run there and nothing gets banned. Use a real command to test purging.
+- Lint: `composer ci` (Pint + Larastan).
 - VCL changes: keep `example.vcl` and `example-varnish-6.0.vcl` in sync (only the ban call differs) and compile both
   (`varnishd -C -f`, CI job `vcl`). For behaviour, `varnishtest` with a `.vtc` file can drive a fake backend and
   clients, e.g. to check which cookies reach the backend.
-- Don't add custom tagging or purging for elements — extend Craft's tags (`ElementQuery::EVENT_DEFINE_CACHE_TAGS`,
-  `Element::EVENT_DEFINE_CACHE_TAGS`) so `{% cache %}` and Varnish stay consistent.
+- Don't add custom tagging or purging for elements — extend Craft's tags (`ElementQueryCacheTagsResolving`,
+  `ElementCacheTagsResolving`) so `{% cache %}` and Varnish stay consistent.

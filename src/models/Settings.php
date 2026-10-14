@@ -2,10 +2,11 @@
 
 namespace studioespresso\varnish\models;
 
-use craft\base\Model;
-use craft\helpers\App;
+use CraftCms\Cms\Plugin\PluginSettings;
+use CraftCms\Cms\Support\Env;
+use Illuminate\Validation\Validator;
 
-class Settings extends Model
+class Settings extends PluginSettings
 {
     /**
      * Varnish servers that receive BAN requests, e.g. `http://varnish` or `http://10.0.0.11:6081`.
@@ -51,54 +52,42 @@ class Settings extends Model
      */
     public function getServers(): array
     {
-        return array_map(function(string $url) {
+        return array_map(function (string $url) {
             // Env var references can't be split into host and port; show them as-is.
             if (str_starts_with($url, '$')) {
                 return ['host' => $url, 'port' => ''];
             }
             $parts = parse_url(str_contains($url, '://') ? $url : "http://$url");
             $scheme = $parts['scheme'] ?? 'http';
+
             return [
-                'host' => ($scheme !== 'http' ? "$scheme://" : '') . ($parts['host'] ?? $url),
+                'host' => ($scheme !== 'http' ? "$scheme://" : '').($parts['host'] ?? $url),
                 'port' => $parts['port'] ?? ($scheme === 'https' ? 443 : 80),
             ];
         }, $this->purgeUrls);
     }
 
     /**
-     * Sets [[purgeUrls]] from CP table rows.
+     * Sets [[purgeUrls]] from CP table rows (posted as `servers`; an empty table may arrive as `''`).
      */
-    public function setServers(array $rows): void
+    public function setServers(array|string|null $rows): void
     {
         $this->purgeUrls = [];
-        foreach ($rows as $row) {
+        foreach ($rows ?: [] as $row) {
             $host = trim($row['host'] ?? '');
             if ($host === '') {
                 continue;
             }
-            $port = trim((string)($row['port'] ?? ''));
+            $port = trim((string) ($row['port'] ?? ''));
             if (str_starts_with($host, '$')) {
                 $this->purgeUrls[] = $host;
+
                 continue;
             }
             $url = rtrim(str_contains($host, '://') ? $host : "http://$host", '/');
             $defaultPort = str_starts_with($url, 'https://') ? '443' : '80';
-            $this->purgeUrls[] = $url . ($port !== '' && $port !== $defaultPort ? ":$port" : '');
+            $this->purgeUrls[] = $url.($port !== '' && $port !== $defaultPort ? ":$port" : '');
         }
-    }
-
-    /**
-     * The CP table posts its rows as `purgeUrls` (`''` when empty), so Craft stores them under the real setting;
-     * convert rows to URLs here. A config file passes plain URL strings, which go through untouched.
-     */
-    public function setAttributes($values, $safeOnly = true): void
-    {
-        $urls = is_array($values) ? ($values['purgeUrls'] ?? null) : null;
-        if ($urls === '' || (is_array($urls) && array_filter($urls, 'is_array'))) {
-            $this->setServers($urls ?: []);
-            unset($values['purgeUrls']);
-        }
-        parent::setAttributes($values, $safeOnly);
     }
 
     /**
@@ -110,29 +99,31 @@ class Settings extends Model
     {
         $parts = parse_url($url);
         $host = $parts['host'] ?? null;
-        $ip = $host !== null ? trim((string)App::parseEnv((string)($this->resolve[$host] ?? ''))) : '';
-        if (!$ip) {
+        $ip = $host !== null ? trim((string) Env::parse((string) ($this->resolve[$host] ?? ''))) : '';
+        if (! $ip) {
             return [];
         }
         $port = $parts['port'] ?? (($parts['scheme'] ?? 'http') === 'https' ? 443 : 80);
+
         return ["$host:$port:$ip"];
     }
 
     /**
      * @return string[] [[hostnames]] with environment variables resolved (which may hold several, separated by commas
-     * or spaces), lowercased, without ports or a trailing dot. Anything else the VCL would refuse is dropped.
+     *                  or spaces), lowercased, without ports or a trailing dot. Anything else the VCL would refuse is dropped.
      */
     public function getResolvedHostnames(): array
     {
         $hosts = [];
         foreach ($this->hostnames as $value) {
-            foreach (preg_split('/[\s,]+/', (string)App::parseEnv((string)$value), -1, PREG_SPLIT_NO_EMPTY) as $host) {
-                $host = rtrim(strtolower((string)preg_replace('/:\d+$/', '', $host)), '.');
+            foreach (preg_split('/[\s,]+/', (string) Env::parse((string) $value), -1, PREG_SPLIT_NO_EMPTY) as $host) {
+                $host = rtrim(strtolower((string) preg_replace('/:\d+$/', '', $host)), '.');
                 if (preg_match('/^[a-z0-9.-]+$/', $host)) {
                     $hosts[] = $host;
                 }
             }
         }
+
         return array_values(array_unique($hosts));
     }
 
@@ -141,24 +132,34 @@ class Settings extends Model
      */
     public function getResolvedPurgeUrls(): array
     {
-        return array_values(array_filter(array_map(fn($url) => trim((string)App::parseEnv((string)$url)), $this->purgeUrls)));
+        return array_values(array_filter(array_map(fn ($url) => trim((string) Env::parse((string) $url)), $this->purgeUrls)));
     }
 
-    protected function defineRules(): array
+    public function getRules(): array
     {
         return [
-            ['purgeUrls', 'validatePurgeUrls'],
+            'purgeUrls' => ['array', function (string $attribute, array $urls, \Closure $fail) {
+                foreach ($urls as $url) {
+                    $resolved = (string) Env::parse((string) $url);
+                    // parse_url() fails on an out-of-range port, which filter_var() accepts
+                    if (! filter_var($resolved, FILTER_VALIDATE_URL) || empty(parse_url($resolved)['host'])) {
+                        $fail("“{$url}” isn’t a valid server address.");
+                    }
+                }
+            }],
+            'resolve' => ['array'],
+            'hostnames' => ['array'],
+            'maxTagsHeaderLength' => ['integer', 'min:1'],
         ];
     }
 
-    public function validatePurgeUrls(string $attribute): void
+    /**
+     * The CP edits the servers as a `servers` table, so show [[purgeUrls]] errors there too.
+     */
+    public function afterValidate(?Validator $validator = null): void
     {
-        foreach ($this->purgeUrls as $url) {
-            $resolved = App::parseEnv($url);
-            $port = parse_url((string)$resolved, PHP_URL_PORT);
-            if (!filter_var($resolved, FILTER_VALIDATE_URL) || ($port !== null && ($port < 1 || $port > 65535))) {
-                $this->addError($attribute, "“{$url}” isn’t a valid server address.");
-            }
+        foreach ($validator?->errors()->get('purgeUrls') ?? [] as $message) {
+            $validator->errors()->add('servers', $message);
         }
     }
 }

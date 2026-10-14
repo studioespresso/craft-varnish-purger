@@ -2,42 +2,41 @@
 
 namespace studioespresso\varnish\controllers;
 
-use Craft;
-use craft\web\Controller;
-use craft\web\View;
+use CraftCms\Cms\Cms;
+use CraftCms\Cms\Support\Facades\Sites;
+use CraftCms\Cms\View\TemplateMode;
+use Illuminate\Http\Request;
+use Illuminate\Http\Response;
+use Illuminate\Support\Facades\Log;
 use studioespresso\varnish\Varnish;
 use Throwable;
-use yii\web\BadRequestHttpException;
-use yii\web\Response;
+
+use function CraftCms\Cms\template;
 
 /**
  * Renders ESI fragments. It's an action request, which the plugin never tags and the VCL never caches, so a
  * fragment is rendered fresh for every page view.
  */
-class EsiController extends Controller
+class EsiController
 {
-    protected array|bool|int $allowAnonymous = ['render'];
-
-    public function actionRender(string $data): Response
+    public function render(Request $request): Response
     {
-        $fragment = Varnish::getInstance()->esi->decode($data);
-        if ($fragment === null) {
-            throw new BadRequestHttpException('Invalid ESI fragment.');
-        }
-        $this->response->setNoCacheHeaders();
-        $sites = Craft::$app->getSites();
-        if ($fragment['s'] !== null && ($site = $sites->getSiteById($fragment['s']))) {
-            $sites->setCurrentSite($site);
+        $fragment = Varnish::getInstance()->esi->decode((string) $request->query('data'), (string) $request->query('signature'));
+        abort_if($fragment === null, 400, 'Invalid ESI fragment.');
+
+        if ($fragment['s'] !== null && ($site = Sites::getSiteById($fragment['s']))) {
+            Sites::setCurrentSite($site);
         }
         try {
-            return $this->asRaw($this->getView()->renderTemplate($fragment['t'], $fragment['v'], View::TEMPLATE_MODE_SITE));
+            return response(template($fragment['t'], $fragment['v'], TemplateMode::Site))->setNoCacheHeaders();
         } catch (Throwable $e) {
             // Varnish inserts whatever comes back into the page: an empty fragment beats an error page in the middle
-            if (Craft::$app->getConfig()->getGeneral()->devMode) {
+            if (Cms::config()->devMode) {
                 throw $e;
             }
-            Craft::error("ESI fragment {$fragment['t']} failed: {$e->getMessage()}", __METHOD__);
-            return $this->asRaw('')->setStatusCode(500);
+            Log::error("ESI fragment {$fragment['t']} failed: {$e->getMessage()}");
+
+            return response('', 500)->setNoCacheHeaders();
         }
     }
 }

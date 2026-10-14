@@ -2,40 +2,35 @@
 
 namespace studioespresso\varnish\services;
 
-use Craft;
-use craft\base\Element;
-use craft\base\ElementInterface;
-use craft\db\Query;
-use craft\db\Table;
-use craft\events\InvalidateElementCachesEvent;
-use craft\helpers\ElementHelper;
-use craft\queue\jobs\UpdateSearchIndex;
-use GuzzleHttp\Promise\Create;
-use GuzzleHttp\Promise\Utils;
+use CraftCms\Cms\Database\Table;
+use CraftCms\Cms\Element\Contracts\ElementInterface;
+use CraftCms\Cms\Element\Element;
+use CraftCms\Cms\Element\ElementHelper;
+use CraftCms\Cms\Element\Events\ElementCachesInvalidated;
+use CraftCms\Cms\Search\Jobs\UpdateSearchIndex;
+use CraftCms\Cms\Support\Facades\Elements;
+use Illuminate\Http\Client\Pool;
+use Illuminate\Http\Client\Response;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
 use studioespresso\varnish\helpers\TagHelper;
 use studioespresso\varnish\Varnish;
 use Throwable;
-use yii\base\Component;
 
 /**
  * Collects the tags Craft invalidates during a request and bans them in Varnish once, at the end of the request.
  */
-class Purger extends Component
+class Purger
 {
     /** Pending-ban key for tags that must be banned on every site. */
     public const ALL_SITES = '*';
 
     /** @var array<int|string, array<string, true>> header tags to ban, keyed by site ID or [[ALL_SITES]] */
     private array $pending = [];
-    /** Element class whose structure is being changed, see [[startStructureChange()]] */
-    private ?string $structureChange = null;
 
-    public function queue(InvalidateElementCachesEvent $e): void
+    public function queue(ElementCachesInvalidated $e): void
     {
-        if (!$e->element && $this->structureChange && $e->tags === ["element::$this->structureChange"]) {
-            $this->structureChange = null;
-            return;
-        }
         // Live pages never depend on drafts/revisions; skipping them avoids a ban on every autosave.
         if ($e->element && self::isDraftOrRevision($e->element)) {
             return;
@@ -47,33 +42,21 @@ class Purger extends Component
     }
 
     /**
-     * Craft invalidates a whole element type after an element is inserted or moved in a structure
-     * (craftcms/cms#14846). Neo keeps one block structure per field and owner and rebuilds it on every owner save,
-     * so every page with Neo content would be purged by any save. That save already bans the owner and its
-     * `field-owner` tag, so the type-wide ban that follows a Neo structure change is skipped.
-     */
-    public function startStructureChange(ElementInterface $element): void
-    {
-        // (matched by name: Neo isn't a dependency)
-        $this->structureChange = is_a($element, 'benf\neo\elements\Block') ? $element::class : null;
-    }
-
-    /**
      * Purges search result pages once Craft's queued search-index update for an element has run.
      */
     public function queueSearchIndexed(UpdateSearchIndex $job): void
     {
         // Saving a draft also updates its search index; live search results don't change
         try {
-            $element = Craft::$app->getElements()->getElementById($job->elementId, $job->elementType, '*');
+            $element = is_int($job->elementId) ? Elements::getElementById($job->elementId, $job->elementType, '*') : null;
         } catch (Throwable) {
             $element = null;
         }
         if ($element && self::isDraftOrRevision($element)) {
             return;
         }
-        $scope = is_numeric($job->siteId) ? (int)$job->siteId : self::ALL_SITES;
-        $this->pending[$scope][TagHelper::headerTag("element::$job->elementType::" . PageTags::SEARCH_TAG)] = true;
+        $scope = is_numeric($job->siteId) ? (int) $job->siteId : self::ALL_SITES;
+        $this->pending[$scope][TagHelper::headerTag("element::$job->elementType::".PageTags::SEARCH_TAG)] = true;
     }
 
     /**
@@ -91,32 +74,31 @@ class Purger extends Component
         $attributes = $element->getDirtyAttributes();
         $fields = $element->getDirtyFields();
         // 'id' is dirty on a newly saved element
-        if ((!$attributes && !$fields) || in_array('id', $attributes, true)) {
+        if ((! $attributes && ! $fields) || in_array('id', $attributes, true)) {
             return false;
         }
         // Applying a draft: Craft only reports the changes on the draft's own site, but it may have changed others
         if ($element instanceof Element && $element->updatingFromDerivative && $element->duplicateOf) {
-            $otherSites = ['and', ['elementId' => $element->duplicateOf->id], ['not', ['siteId' => $element->siteId]]];
-            if (
-                (new Query())->from(Table::CHANGEDATTRIBUTES)->where($otherSites)->exists() ||
-                (new Query())->from(Table::CHANGEDFIELDS)->where($otherSites)->exists()
-            ) {
-                return false;
+            foreach ([Table::CHANGEDATTRIBUTES, Table::CHANGEDFIELDS] as $table) {
+                if (DB::table($table)->where('elementId', $element->duplicateOf->id)->where('siteId', '!=', $element->siteId)->exists()) {
+                    return false;
+                }
             }
         }
         foreach ($attributes as $attribute) {
             // Slug, URI and enabled status aren't site-specific here: other sites link to this version (a
             // language switcher via `entry.localized`), so those pages need the new URL, or to drop the link.
-            if ($attribute !== 'title' || !$element->getIsTitleTranslatable()) {
+            if ($attribute !== 'title' || ! $element->getIsTitleTranslatable()) {
                 return false;
             }
         }
         $layout = $element->getFieldLayout();
         foreach ($fields as $handle) {
-            if (!$layout?->getFieldByHandle($handle)?->getIsTranslatable($element)) {
+            if (! $layout?->getFieldByHandle($handle)?->getIsTranslatable($element)) {
                 return false;
             }
         }
+
         return true;
     }
 
@@ -126,7 +108,7 @@ class Purger extends Component
     public function getPending(): array
     {
         // PHP turns numeric string keys into ints; cast them back.
-        return array_map(fn(array $tags) => array_map('strval', array_keys($tags)), $this->pending);
+        return array_map(fn (array $tags) => array_map('strval', array_keys($tags)), $this->pending);
     }
 
     /**
@@ -139,7 +121,7 @@ class Purger extends Component
     {
         $pending = $this->getPending();
         $this->pending = [];
-        if (!$pending) {
+        if (! $pending) {
             return;
         }
         try {
@@ -147,11 +129,11 @@ class Purger extends Component
             unset($pending[self::ALL_SITES]);
             $groups = [[$everywhere, null]];
             foreach ($pending as $siteId => $tags) {
-                $groups[] = [array_values(array_diff($tags, $everywhere)), (int)$siteId];
+                $groups[] = [array_values(array_diff($tags, $everywhere)), (int) $siteId];
             }
             $this->send($groups);
         } catch (Throwable $e) {
-            Craft::error('Varnish ban failed: ' . $e->getMessage(), __METHOD__);
+            Log::error('Varnish ban failed: '.$e->getMessage());
         }
     }
 
@@ -159,8 +141,8 @@ class Purger extends Component
      * Sends a BAN for the given header tags to every configured Varnish instance, and logs each server's answer:
      * failures (refused, unreachable, error status) as errors, successes as info (visible with devMode on).
      *
-     * @param string[] $tags
-     * @param int|null $siteId only ban pages of this site; null bans them on every site
+     * @param  string[]  $tags
+     * @param  int|null  $siteId  only ban pages of this site; null bans them on every site
      * @return array<array{url: string, ok: bool, status: int|null, message: string}> one result per request
      */
     public function ban(array $tags, ?int $siteId = null): array
@@ -169,90 +151,96 @@ class Purger extends Component
     }
 
     /**
-     * @param array<array{0: string[], 1: int|null}> $groups tags and the site to limit them to (null: every site)
+     * @param  array<array{0: string[], 1: int|null}>  $groups  tags and the site to limit them to (null: every site)
      * @return array<array{url: string, ok: bool, status: int|null, message: string}>
      */
     private function send(array $groups): array
     {
-        $groups = array_filter($groups, fn(array $group) => $group[0]);
-        if (!$groups) {
+        $groups = array_filter($groups, fn (array $group) => $group[0]);
+        if (! $groups) {
             return [];
         }
         $settings = Varnish::getInstance()->getSettings();
         $urls = $settings->getResolvedPurgeUrls();
         $hostnames = $settings->getResolvedHostnames();
-        if (!$urls) {
-            Craft::info('Varnish ban skipped: no servers configured (Settings → Plugins → Varnish, or config/varnish.php).', __METHOD__);
+        if (! $urls) {
+            Log::info('Varnish ban skipped: no servers configured (Settings → Plugins → Varnish, or config/craft/varnish.php).');
+
             return [];
         }
-        // Sent in parallel, so an unreachable server costs one timeout, not one per server, site and chunk.
-        // http_errors off: a refusal (e.g. 403) is an answer we want to log, not an exception.
-        $client = Craft::createGuzzleClient(['connect_timeout' => 2, 'timeout' => 5, 'http_errors' => false]);
         $requests = [];
-        $promises = [];
         foreach ($urls as $url) {
-            $options = [];
-            if ($resolve = $settings->getCurlResolveFor($url)) {
-                // Connect to the configured IP, keeping the hostname for routing and the TLS certificate
-                $options['curl'] = [CURLOPT_RESOLVE => $resolve];
-            }
             foreach ($groups as [$tags, $siteId]) {
                 // Chunked to stay under Varnish's request header limit.
                 foreach (array_chunk($tags, 100) as $chunk) {
-                    $options['headers'] = self::banHeaders($chunk, $siteId, $hostnames);
                     $requests[] = [$url, $chunk, $siteId];
-                    try {
-                        $promises[] = $client->requestAsync('BAN', $url, $options);
-                    } catch (Throwable $e) {
-                        // E.g. a malformed URL from an environment variable
-                        $promises[] = Create::rejectionFor($e);
-                    }
                 }
             }
         }
 
+        // Sent in parallel, so an unreachable server costs one timeout, not one per server, site and chunk.
+        // Laravel's HTTP client doesn't throw on error statuses: a refusal (e.g. 403) is an answer we want to log.
+        $answers = Http::pool(function (Pool $pool) use ($requests, $settings, $hostnames) {
+            foreach ($requests as $i => [$url, $tags, $siteId]) {
+                // E.g. a malformed URL from an environment variable; it would fail the whole pool
+                if (! filter_var($url, FILTER_VALIDATE_URL)) {
+                    continue;
+                }
+                $request = $pool->as((string) $i)
+                    ->connectTimeout(2)
+                    ->timeout(5)
+                    ->withHeaders(self::banHeaders($tags, $siteId, $hostnames));
+                if ($resolve = $settings->getCurlResolveFor($url)) {
+                    // Connect to the configured IP, keeping the hostname for routing and the TLS certificate
+                    $request->withOptions(['curl' => [CURLOPT_RESOLVE => $resolve]]);
+                }
+                $request->send('BAN', $url);
+            }
+        });
+
         $results = [];
-        foreach (Utils::settle($promises)->wait() as $i => $settled) {
-            [$url, $tags, $siteId] = $requests[$i];
-            if ($settled['state'] === 'rejected') {
-                // No answer at all: DNS, connection refused, timeout…
-                $reason = $settled['reason'];
-                $result = ['url' => $url, 'ok' => false, 'status' => null, 'message' => $reason instanceof Throwable ? $reason->getMessage() : (string)$reason];
-            } else {
-                $response = $settled['value'];
-                $status = $response->getStatusCode();
+        foreach ($requests as $i => [$url, $tags, $siteId]) {
+            $answer = $answers[(string) $i] ?? null;
+            if ($answer instanceof Response) {
+                $status = $answer->status();
                 // Our VCL puts the reason in the status line, e.g. "Forbidden: BAN from 10.1.2.3"
-                $result = ['url' => $url, 'ok' => $status === 200, 'status' => $status, 'message' => $response->getReasonPhrase()];
+                $result = ['url' => $url, 'ok' => $status === 200, 'status' => $status, 'message' => $answer->reason()];
+            } else {
+                // No answer at all: DNS, connection refused, timeout…
+                $message = $answer instanceof Throwable ? $answer->getMessage() : 'invalid URL';
+                $result = ['url' => $url, 'ok' => false, 'status' => null, 'message' => $message];
             }
             $results[] = $result;
             $scope = $siteId !== null ? " on site $siteId" : '';
             $line = sprintf('%s → %s%s', $url, $result['status'] ?? 'no response', $result['message'] !== '' ? " {$result['message']}" : '');
             if ($result['ok']) {
-                Craft::info("Varnish banned$scope: " . implode(' ', $tags) . " ($line)", __METHOD__);
+                Log::info("Varnish banned$scope: ".implode(' ', $tags)." ($line)");
             } else {
-                Craft::error("Varnish ban failed$scope ($line) for tags: " . implode(' ', $tags), __METHOD__);
+                Log::error("Varnish ban failed$scope ($line) for tags: ".implode(' ', $tags));
             }
         }
+
         return $results;
     }
 
     /**
      * Headers of one BAN request, as the example VCL reads them.
      *
-     * @param string[] $tags
-     * @param string[] $hostnames
+     * @param  string[]  $tags
+     * @param  string[]  $hostnames
      * @return array<string, string>
      */
     public static function banHeaders(array $tags, ?int $siteId, array $hostnames): array
     {
         $headers = ['X-Cache-Tags-Ban' => implode('|', $tags)];
         if ($siteId !== null) {
-            $headers[PageTags::SITE_HEADER . '-Ban'] = (string)$siteId;
+            $headers[PageTags::SITE_HEADER.'-Ban'] = (string) $siteId;
         }
         if ($hostnames) {
             // Only this install's pages, when other sites share the Varnish
             $headers['X-Cache-Hosts-Ban'] = implode('|', $hostnames);
         }
+
         return $headers;
     }
 

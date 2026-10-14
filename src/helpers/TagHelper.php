@@ -2,7 +2,7 @@
 
 namespace studioespresso\varnish\helpers;
 
-use craft\base\ElementInterface;
+use CraftCms\Cms\Element\Contracts\ElementInterface;
 
 class TagHelper
 {
@@ -53,13 +53,14 @@ class TagHelper
             $tag = self::TYPES[$tag] ?? $tag;
             if (isset($parts[2])) {
                 [$scope, $id] = explode(':', $parts[2], 2) + [1 => null];
-                $tag .= ':' . (self::SCOPES[$scope] ?? $scope) . ($id !== null ? ":$id" : '');
+                $tag .= ':'.(self::SCOPES[$scope] ?? $scope).($id !== null ? ":$id" : '');
             }
         } elseif ($tag === 'element') {
             $tag = self::TAG_ALL;
         } else {
             $tag = preg_replace('/^element::/', '', $tag);
         }
+
         // Anything else (e.g. tags from other plugins) is squeezed into the charset the VCL accepts.
         return preg_replace('/[^A-Za-z0-9:._-]/', '_', $tag);
     }
