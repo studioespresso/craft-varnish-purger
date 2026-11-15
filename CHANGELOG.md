@@ -1,6 +1,10 @@
 # Changelog
 
-## 6.0.0-beta.01 - Unreleased
+## 6.0.0-beta.02 - 2026-11-15
+### Added
+- Updated Settings UI to match Craft's new UI style
+
+## 6.0.0-beta.01 - 2026-10-14
 - Craft CMS 6 (Laravel) support; Craft 5 stays on 1.x
 - Settings come from `config/craft/varnish.php` (a Laravel config file, use `env()`), Craft 5's per-environment format is gone
 - Console commands are `varnish:check` and `varnish:purge` (`varnish/check` and `varnish/purge` still work)
