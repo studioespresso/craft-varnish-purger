@@ -3,12 +3,12 @@
 namespace studioespresso\varnish;
 
 use CraftCms\Cms\Element\Events\ElementCachesInvalidated;
-use CraftCms\Cms\Form\Controls\Number;
-use CraftCms\Cms\Form\Controls\Table;
-use CraftCms\Cms\Form\Enums\ControlMode;
-use CraftCms\Cms\Form\Form;
-use CraftCms\Cms\Form\FormContext;
-use CraftCms\Cms\Form\Nodes\Field;
+use CraftCms\Cms\Ui\Controls\Number;
+use CraftCms\Cms\Ui\Controls\Table;
+use CraftCms\Cms\Ui\Enums\ControlMode;
+use CraftCms\Cms\Ui\Ui;
+use CraftCms\Cms\Ui\UiContext;
+use CraftCms\Cms\Ui\Nodes\Field;
 use CraftCms\Cms\Plugin\Plugin;
 use CraftCms\Cms\Plugin\PluginSettings;
 use CraftCms\Cms\Search\Jobs\UpdateSearchIndex;
@@ -93,20 +93,20 @@ class Varnish extends Plugin
         return new Settings;
     }
 
-    public function settingsForm(FormContext $context = new FormContext): ?Form
+    public function settingsUi(UiContext $context = new UiContext): ?Ui
     {
         // config/craft/varnish.php wins over the CP value, so lock the table when it sets the servers.
         $overridden = array_key_exists('purgeUrls', (array) config('craft.varnish', []));
 
-        return Form::make([
+        return Ui::make([
             Field::make(t('Varnish servers', category: 'varnish'))
                 ->instructions(t('Every Varnish server that caches this site. Saving content sends a BAN request to each of them, so use their internal addresses (e.g. `varnish` or `10.0.0.11`), not the public site URL. The port is usually 6081 (Linux packages) or 80 (Docker); leave it empty for 80. Hosts can be environment variables, like `$VARNISH_HOST`.', category: 'varnish'))
                 ->warning($overridden ? t('This is being overridden by the `purgeUrls` setting in `config/craft/varnish.php`.', category: 'varnish') : null)
                 // Not `purgeUrls`: the table edits host/port rows, Settings::setServers() turns them into URLs.
                 ->control(Table::make('servers')
                     ->columns([
-                        'host' => ['heading' => t('Host', category: 'varnish'), 'type' => 'singleline', 'placeholder' => 'varnish', 'code' => true],
-                        'port' => ['heading' => t('Port', category: 'varnish'), 'control' => Number::make('port')->min(1)->max(65535), 'width' => 120],
+                        'host' => ['heading' => t('Host', category: 'varnish'), 'type' => 'singleline', 'placeholder' => 'varnish', 'code' => true, 'width' => 85],
+                        'port' => ['heading' => t('Port', category: 'varnish'), 'control' => Number::make('port')->min(1)->max(65535), 'width' => 15],
                     ])
                     // New rows assume a Linux-package install (port 6081); an empty port still means 80, like ddev/Docker.
                     ->defaultValues(['port' => 6081])
