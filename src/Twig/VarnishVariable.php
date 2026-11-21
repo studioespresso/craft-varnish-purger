@@ -1,8 +1,8 @@
 <?php
 
-namespace studioespresso\varnish\variables;
+namespace studioespresso\varnish\Twig;
 
-use studioespresso\varnish\Varnish;
+use studioespresso\varnish\Services\Esi;
 use Twig\Markup;
 
 /**
@@ -18,6 +18,6 @@ class VarnishVariable
      */
     public function include(string $template, array $variables = []): Markup
     {
-        return Varnish::getInstance()->esi->include($template, $variables);
+        return app(Esi::class)->include($template, $variables);
     }
 }

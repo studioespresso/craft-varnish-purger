@@ -19,7 +19,8 @@
     }
   ],
   "require": {
-    "craftcms/cms": "^6.0.0-alpha.8"
+    "php": ">=8.5",
+    "craftcms/cms": "^6.0.0-beta.2"
   },
   "require-dev": {
     "larastan/larastan": "^3.15",

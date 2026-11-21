@@ -4,7 +4,7 @@ namespace studioespresso\varnish\tests\Unit;
 
 use Orchestra\Testbench\TestCase;
 use PHPUnit\Framework\Attributes\DataProvider;
-use studioespresso\varnish\helpers\TagHelper;
+use studioespresso\varnish\Support\TagHelper;
 
 class HeaderTagTest extends TestCase
 {

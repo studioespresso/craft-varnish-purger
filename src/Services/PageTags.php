@@ -1,6 +1,6 @@
 <?php
 
-namespace studioespresso\varnish\services;
+namespace studioespresso\varnish\Services;
 
 use CraftCms\Cms\Element\Contracts\ElementInterface;
 use CraftCms\Cms\Element\Queries\AssetQuery;
@@ -13,11 +13,12 @@ use CraftCms\Cms\Support\Facades\Sections;
 use CraftCms\Cms\Support\Facades\Sites;
 use CraftCms\Cms\View\Events\PageTemplateRendered;
 use CraftCms\Cms\View\Events\PageTemplateRendering;
+use Illuminate\Container\Attributes\Scoped;
 use Illuminate\Foundation\Http\Events\RequestHandled;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Log;
-use studioespresso\varnish\helpers\TagHelper;
-use studioespresso\varnish\Varnish;
+use studioespresso\varnish\Settings;
+use studioespresso\varnish\Support\TagHelper;
 use Symfony\Component\HttpFoundation\Response;
 
 /**
@@ -28,6 +29,7 @@ use Symfony\Component\HttpFoundation\Response;
  * every element query (e.g. `element::craft\elements\Entry::section:3`), and the tags of any `{% cache %}` block
  * served from cache.
  */
+#[Scoped]
 class PageTags
 {
     public const HEADER = 'X-Cache-Tags';
@@ -136,7 +138,7 @@ class PageTags
             return;
         }
         $header = implode(' ', $tags);
-        $max = Varnish::getInstance()->getSettings()->maxTagsHeaderLength;
+        $max = app(Settings::class)->maxTagsHeaderLength;
         if (strlen($header) > $max) {
             $url = app()->runningInConsole() ? 'page' : request()->getRequestUri();
             Log::warning(sprintf('Not caching %s in Varnish: its %s header would be %d bytes (maxTagsHeaderLength: %d).', $url, self::HEADER, strlen($header), $max));

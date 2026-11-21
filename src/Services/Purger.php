@@ -1,6 +1,6 @@
 <?php
 
-namespace studioespresso\varnish\services;
+namespace studioespresso\varnish\Services;
 
 use CraftCms\Cms\Database\Table;
 use CraftCms\Cms\Element\Contracts\ElementInterface;
@@ -9,18 +9,20 @@ use CraftCms\Cms\Element\ElementHelper;
 use CraftCms\Cms\Element\Events\ElementCachesInvalidated;
 use CraftCms\Cms\Search\Jobs\UpdateSearchIndex;
 use CraftCms\Cms\Support\Facades\Elements;
+use Illuminate\Container\Attributes\Scoped;
 use Illuminate\Http\Client\Pool;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
-use studioespresso\varnish\helpers\TagHelper;
-use studioespresso\varnish\Varnish;
+use studioespresso\varnish\Settings;
+use studioespresso\varnish\Support\TagHelper;
 use Throwable;
 
 /**
  * Collects the tags Craft invalidates during a request and bans them in Varnish once, at the end of the request.
  */
+#[Scoped]
 class Purger
 {
     /** Pending-ban key for tags that must be banned on every site. */
@@ -160,7 +162,7 @@ class Purger
         if (! $groups) {
             return [];
         }
-        $settings = Varnish::getInstance()->getSettings();
+        $settings = app(Settings::class);
         $urls = $settings->getResolvedPurgeUrls();
         $hostnames = $settings->getResolvedHostnames();
         if (! $urls) {

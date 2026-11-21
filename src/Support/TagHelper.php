@@ -1,6 +1,6 @@
 <?php
 
-namespace studioespresso\varnish\helpers;
+namespace studioespresso\varnish\Support;
 
 use CraftCms\Cms\Element\Contracts\ElementInterface;
 

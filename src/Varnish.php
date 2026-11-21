@@ -3,27 +3,26 @@
 namespace studioespresso\varnish;
 
 use CraftCms\Cms\Element\Events\ElementCachesInvalidated;
-use CraftCms\Cms\Ui\Controls\Number;
-use CraftCms\Cms\Ui\Controls\Table;
-use CraftCms\Cms\Ui\Enums\ControlMode;
-use CraftCms\Cms\Ui\Ui;
-use CraftCms\Cms\Ui\UiContext;
-use CraftCms\Cms\Ui\Nodes\Field;
 use CraftCms\Cms\Plugin\Plugin;
 use CraftCms\Cms\Plugin\PluginSettings;
 use CraftCms\Cms\Search\Jobs\UpdateSearchIndex;
 use CraftCms\Cms\Twig\Variables\CraftVariable;
+use CraftCms\Cms\Ui\Controls\Number;
+use CraftCms\Cms\Ui\Controls\Table;
+use CraftCms\Cms\Ui\Enums\ControlMode;
+use CraftCms\Cms\Ui\Nodes\Field;
+use CraftCms\Cms\Ui\Ui;
+use CraftCms\Cms\Ui\UiContext;
 use Illuminate\Queue\Events\JobExceptionOccurred;
 use Illuminate\Queue\Events\JobProcessed;
 use Illuminate\Support\Facades\Event;
-use studioespresso\varnish\console\CheckCommand;
-use studioespresso\varnish\console\PurgeCommand;
-use studioespresso\varnish\helpers\TagHelper;
-use studioespresso\varnish\models\Settings;
-use studioespresso\varnish\services\Esi;
-use studioespresso\varnish\services\PageTags;
-use studioespresso\varnish\services\Purger;
-use studioespresso\varnish\variables\VarnishVariable;
+use studioespresso\varnish\Console\Commands\CheckCommand;
+use studioespresso\varnish\Console\Commands\PurgeCommand;
+use studioespresso\varnish\Services\Esi;
+use studioespresso\varnish\Services\PageTags;
+use studioespresso\varnish\Services\Purger;
+use studioespresso\varnish\Support\TagHelper;
+use studioespresso\varnish\Twig\VarnishVariable;
 use Throwable;
 
 use function CraftCms\Cms\t;
@@ -42,14 +41,16 @@ class Varnish extends Plugin
         PurgeCommand::class,
     ];
 
-    public Esi $esi { get => $this->esi ??= new Esi; }
+    public Esi $esi { get => app(Esi::class); }
 
-    public PageTags $pageTags { get => $this->pageTags ??= new PageTags; }
+    public PageTags $pageTags { get => app(PageTags::class); }
 
-    public Purger $purger { get => $this->purger ??= new Purger; }
+    public Purger $purger { get => app(Purger::class); }
 
     public function boot(): void
     {
+        $this->app->singleton(Settings::class, fn () => $this->getSettings());
+
         $this->pageTags->listen();
 
         // Craft fires this on save, delete, restore and move, including Matrix owners.

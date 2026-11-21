@@ -1,12 +1,13 @@
 <?php
 
-namespace studioespresso\varnish\console;
+namespace studioespresso\varnish\Console\Commands;
 
 use CraftCms\Cms\Console\CraftCommand;
 use CraftCms\Cms\Support\Facades\Sites;
 use Illuminate\Console\Command;
-use studioespresso\varnish\helpers\TagHelper;
-use studioespresso\varnish\Varnish;
+use studioespresso\varnish\Services\Purger;
+use studioespresso\varnish\Settings;
+use studioespresso\varnish\Support\TagHelper;
 
 class PurgeCommand extends Command
 {
@@ -20,7 +21,7 @@ class PurgeCommand extends Command
 
     protected $aliases = ['varnish/purge'];
 
-    public function handle(): int
+    public function handle(Purger $purger, Settings $settings): int
     {
         $tags = array_values(array_filter(array_map('trim', explode(',', (string) $this->option('tags'))))) ?: [TagHelper::TAG_ALL];
 
@@ -36,8 +37,7 @@ class PurgeCommand extends Command
             $siteId = $site->id;
         }
 
-        $plugin = Varnish::getInstance();
-        if (! $plugin->getSettings()->getResolvedPurgeUrls()) {
+        if (! $settings->getResolvedPurgeUrls()) {
             $this->components->error('No Varnish servers configured (Settings → Plugins → Varnish, or config/craft/varnish.php).');
 
             return self::INVALID;
@@ -45,7 +45,7 @@ class PurgeCommand extends Command
 
         $this->line(sprintf('Purging %s%s…', implode(', ', $tags), $siteId !== null ? " on site $siteOption" : ''));
         $ok = true;
-        foreach ($plugin->purger->ban($tags, $siteId) as $result) {
+        foreach ($purger->ban($tags, $siteId) as $result) {
             $answer = trim(($result['status'] ?? 'no response').' '.$result['message']);
             if ($result['ok']) {
                 $this->line("<fg=green>✓ {$result['url']}: $answer</>");

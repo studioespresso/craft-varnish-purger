@@ -1,6 +1,6 @@
 <?php
 
-namespace studioespresso\varnish\controllers;
+namespace studioespresso\varnish\Http\Controllers;
 
 use CraftCms\Cms\Cms;
 use CraftCms\Cms\Support\Facades\Sites;
@@ -8,7 +8,7 @@ use CraftCms\Cms\View\TemplateMode;
 use Illuminate\Http\Request;
 use Illuminate\Http\Response;
 use Illuminate\Support\Facades\Log;
-use studioespresso\varnish\Varnish;
+use studioespresso\varnish\Services\Esi;
 use Throwable;
 
 use function CraftCms\Cms\template;
@@ -19,9 +19,9 @@ use function CraftCms\Cms\template;
  */
 class EsiController
 {
-    public function render(Request $request): Response
+    public function render(Request $request, Esi $esi): Response
     {
-        $fragment = Varnish::getInstance()->esi->decode((string) $request->query('data'), (string) $request->query('signature'));
+        $fragment = $esi->decode((string) $request->query('data'), (string) $request->query('signature'));
         abort_if($fragment === null, 400, 'Invalid ESI fragment.');
 
         if ($fragment['s'] !== null && ($site = Sites::getSiteById($fragment['s']))) {

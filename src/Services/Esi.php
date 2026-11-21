@@ -1,10 +1,11 @@
 <?php
 
-namespace studioespresso\varnish\services;
+namespace studioespresso\varnish\Services;
 
 use CraftCms\Cms\Support\Facades\Sites;
 use CraftCms\Cms\Support\Url;
 use CraftCms\Cms\View\TemplateMode;
+use Illuminate\Container\Attributes\Singleton;
 use Twig\Markup;
 
 use function CraftCms\Cms\template;
@@ -14,6 +15,7 @@ use function CraftCms\Cms\template;
  * the page around it. Behind Varnish, include() outputs an `<esi:include>` tag; anywhere else (no Varnish, the
  * `novarnish.` host, console) it renders the template inline, so templates work the same either way.
  */
+#[Singleton]
 class Esi
 {
     /** Request header the VCL sets on every request. */

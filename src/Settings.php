@@ -1,6 +1,6 @@
 <?php
 
-namespace studioespresso\varnish\models;
+namespace studioespresso\varnish;
 
 use CraftCms\Cms\Plugin\PluginSettings;
 use CraftCms\Cms\Support\Env;

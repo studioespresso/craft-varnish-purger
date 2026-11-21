@@ -1,10 +1,11 @@
 <?php
 
-namespace studioespresso\varnish\console;
+namespace studioespresso\varnish\Console\Commands;
 
 use CraftCms\Cms\Console\CraftCommand;
 use Illuminate\Console\Command;
-use studioespresso\varnish\Varnish;
+use studioespresso\varnish\Services\Purger;
+use studioespresso\varnish\Settings;
 
 class CheckCommand extends Command
 {
@@ -16,17 +17,16 @@ class CheckCommand extends Command
 
     protected $aliases = ['varnish/check'];
 
-    public function handle(): int
+    public function handle(Purger $purger, Settings $settings): int
     {
-        $plugin = Varnish::getInstance();
-        if (! $plugin->getSettings()->getResolvedPurgeUrls()) {
+        if (! $settings->getResolvedPurgeUrls()) {
             $this->components->error('No Varnish servers configured (Settings → Plugins → Varnish, or config/craft/varnish.php).');
 
             return self::INVALID;
         }
 
         $ok = true;
-        foreach ($plugin->purger->ban(['varnish-check']) as $result) {
+        foreach ($purger->ban(['varnish-check']) as $result) {
             $answer = trim(($result['status'] ?? 'no response').' '.$result['message']);
             if ($result['ok'] && str_starts_with($result['message'], 'Ban added')) {
                 $this->line("<fg=green>✓ {$result['url']}: $answer</>");

@@ -3,8 +3,8 @@
 namespace studioespresso\varnish\tests\Unit;
 
 use Orchestra\Testbench\TestCase;
-use studioespresso\varnish\models\Settings;
-use studioespresso\varnish\services\Purger;
+use studioespresso\varnish\Services\Purger;
+use studioespresso\varnish\Settings;
 
 class SettingsTest extends TestCase
 {
