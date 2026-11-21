@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+### Fixed
+- The example VCLs logged users out on front-end pages Varnish doesn't cache: they still looked for Craft 5's `_identity` cookie. Requests with a Laravel session or remember-me cookie now bypass the cache. **Update your VCL**, see `UPGRADE.md`.
+
 ## 6.0.0-beta.03 - 2026-11-21
 ### Added
 - Moved plugin structure to Laravel

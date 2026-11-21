@@ -8,15 +8,33 @@ This guide lists what you need to update when moving from Varnish Purger 1.x (Cr
 - PHP 8.5
 - `craftcms/yii2-adapter` is not needed
 
-The VCL hasn't changed: keep the one you deployed for 1.x.
+Update your VCL: the check that passes logged-in users changed (see below). The rest of the VCL is the same as in 1.x.
 
 ## Upgrade steps
 
 1. Move your config file (see below), if you have one.
 2. Deploy, then purge everything once: `php craft varnish/purge`. Pages cached by 1.x contain ESI links in the old format, which 6.x no longer accepts.
-3. Check the setup: `php craft varnish/check`.
+3. Check the setup: `php craft varnish/check`, then log in and open a front-end page: you should stay logged in.
 
 ## Breaking changes
+
+### VCL: logged-in users
+
+1.x passed logged-in users through by Craft 5's `_identity` cookie. Craft 6 doesn't set it, so with the 1.x VCL Varnish strips their session cookie on front-end pages, and the new session Craft starts logs them out. Replace the cookie check in `vcl_recv` with the one from the plugin's `example.vcl` (or `example-varnish-6.0.vcl`):
+
+Before:
+
+```vcl
+req.http.Cookie ~ "_identity="
+```
+
+After:
+
+```vcl
+req.http.Cookie ~ "(^|;\s*)([A-Za-z0-9_.-]+[-_]session|remember_web_[0-9a-f]+)="
+```
+
+It matches Laravel's default `{APP_NAME}-session` cookie and the remember-me cookie. If you set `SESSION_COOKIE`, use that name instead.
 
 ### Config file
 

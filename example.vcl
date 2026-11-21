@@ -91,7 +91,12 @@ sub vcl_recv {
     # Tokens (previews, shared drafts, site tokens)
     req.url ~ "[?&](token|siteToken|x-craft-preview|x-craft-live-preview)=" ||
     req.http.X-Craft-Token || req.http.X-Craft-Preview-Token || req.http.X-Craft-Site-Token ||
-    req.http.Cookie ~ "_identity="
+    # Visitors with a Laravel session (logged-in users, and anyone who saw an uncached page, e.g. a form) bypass
+    # the cache: stripping their cookie would start a new session and its Set-Cookie would log them out (and lose
+    # CSRF tokens and flash messages). Cached responses never set cookies, so visitors who only see cached pages
+    # stay cacheable. Matches the default `{APP_NAME}-session` cookie (`laravel_session` on older apps) and the
+    # remember-me cookie; adjust it if you set SESSION_COOKIE to something else.
+    req.http.Cookie ~ "(^|;\s*)([A-Za-z0-9_.-]+[-_]session|remember_web_[0-9a-f]+)="
   ) {
     return (pass);
   }

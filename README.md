@@ -37,8 +37,9 @@ Then set up Varnish and tell the plugin where it lives.
 
 Start from [`example.vcl`](example.vcl) on Varnish 6.6 and newer, or from [`example-varnish-6.0.vcl`](example-varnish-6.0.vcl) on Varnish 6.0 (check with `varnishd -V`, `varnishadm banner`, or the `Via` response header). The 6.0 version uses `ban()` instead of `std.ban()`, so a ban Varnish can't parse isn't reported back to Craft; otherwise they're identical. Either one:
 
-- only caches pages the plugin has tagged, and passes everything else (the CP, action requests, previews and other token requests, logged-in users, non-GET requests) through to Craft
+- only caches pages the plugin has tagged, and passes everything else (the CP, action requests, previews and other token requests, non-GET requests, and visitors with a Craft session, see below) through to Craft
 - never caches private responses (`Cache-Control: no-store` or `private`)
+- passes visitors with a session cookie straight through: logged-in users, and anyone who saw an uncached page such as a form. Craft 6 sets no separate login cookie, and stripping the session cookie would log them out and lose CSRF tokens and flash messages. The VCL matches the default `{APP_NAME}-session` cookie and the remember-me cookie; adjust it if you set `SESSION_COOKIE`
 - strips cookies from cached pages, and tells browsers not to keep them (`Cache-Control: no-cache`), so a purge also reaches visitors who saw the page before, and editors who log in see their own version
 - drops request headers Craft would use to change the URL, host or site (`X-Forwarded-Host`, `X-Rewrite-Url`, `X-Craft-Site` and the like), so a crafted request can't store a different page under a normal URL. `X-Forwarded-Proto` is kept and becomes part of the cache key.
 - accepts purge requests (`BAN`) only from the IP addresses in `acl purge`, and only when they're sent directly rather than relayed through a proxy or load balancer
