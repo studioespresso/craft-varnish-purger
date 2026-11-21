@@ -1,5 +1,9 @@
 # Changelog
 
+## 6.0.0-beta.03 - 2026-11-21
+### Added
+- Moved plugin structure to Laravel
+
 ## 6.0.0-beta.02 - 2026-11-15
 ### Added
 - Updated Settings UI to match Craft's new UI style
